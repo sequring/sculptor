@@ -1,0 +1,78 @@
+#
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# binary, build directory
+bin/
+chameleon
+chameleon-server
+# build directory
+build/
+# coverage output
+coverage.out
+# test output
+*.test
+# test output
+*.out
+# test output
+*.cover
+# test output
+*.cov
+
+
+# env file
+.env
+
+#config files
+config.yaml
+config.json
+users.json
+proxies.json
+
+#old and backup files
+*.bak
+*.old
+*.b
+*.orig
+*.swp
+
+# IDE files
+.idea/ 
+*.sublime-project
+*.sublime-workspace
+*.sublime-settings
+*.sublime-metadata
+# Visual Studio Code files
+.vscode/
+# JetBrains IDE files
+*.iml
+# Eclipse files
+.project
+.classpath
+
+# MacOS files
+.DS_Store
+# Windows files
+Thumbs.db
+# Log files
+*.log
+logs/*
+# Temporary files
+*.tmp
