@@ -9,6 +9,7 @@ type Recommendation struct {
 }
 
 type CPURecommendation struct {
-	Request *resource.Quantity
-	Limit   *resource.Quantity
+	Request          *resource.Quantity
+	Limit            *resource.Quantity
+	SpikinessWarning bool
 }

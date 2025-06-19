@@ -39,6 +39,11 @@ func (g *Gateway) GetCPULimitMetrics(ctx context.Context, ns, name, timeRange st
 	return g.executeQuery(ctx, "P99 CPU for Limit", query)
 }
 
+func (g *Gateway) GetCPUMedianMetrics(ctx context.Context, ns, name, timeRange string) (float64, error) {
+	query := fmt.Sprintf(`max(quantile_over_time(0.5, sum(rate(container_cpu_usage_seconds_total{namespace="%s", pod=~"^%s-.*", container!=""}[5m])) by (pod, namespace)[%s:1m]))`, ns, name, timeRange)
+	return g.executeQuery(ctx, "P50 CPU for Spikiness", query)
+}
+
 func (g *Gateway) executeQuery(ctx context.Context, queryName string, query string) (float64, error) {
 	log.Printf("Fetching %s metrics from Prometheus...", queryName)
 
