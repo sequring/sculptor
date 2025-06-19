@@ -23,7 +23,8 @@ archives:
     builds:
       - sculptor-cli
     name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
-
+    files:
+      - config.toml
 checksum:
   name_template: 'checksums.txt'
 
