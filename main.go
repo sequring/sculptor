@@ -19,6 +19,7 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
+	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,7 +30,6 @@ import (
 	"k8s.io/client-go/transport/spdy"
 	"sigs.k8s.io/yaml"
 )
-
 
 type Config struct {
 	Kubeconfig string
@@ -54,19 +54,11 @@ type OutputContainer struct {
 	Resources v1.ResourceRequirements `yaml:"resources"`
 }
 
-var (
-	version = "dev"
-	commit  = "none"
-	date    = "unknown"
-	builtBy = "unknown"
-)
-
 var cfg Config
 
 func main() {
 	printLogo()
 	initConfig()
-
 
 	if cfg.Deployment == "" {
 		log.Fatal("Error: --deployment flag is required.")
@@ -122,15 +114,50 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to get deployment '%s' in namespace '%s': %v", cfg.Deployment, cfg.Namespace, err)
 	}
-	//log.Println("Deployment found.")
+	log.Println("Deployment found.")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	memQuery := fmt.Sprintf(`max(quantile_over_time(0.99, sum(container_memory_working_set_bytes{namespace="%s", pod=~"^%s-.*", container!=""}) by (pod, namespace)[%s:]))`, cfg.Namespace, cfg.Deployment, cfg.Range)
-	memP99, err := executePrometheusQuery(ctx, promAPI, memQuery)
+	var memRecommendation *resource.Quantity
+
+	oomKilled, oomPodName, currentMemLimit, err := checkForOOMKilledEvents(ctx, clientset, originalDeployment)
 	if err != nil {
-		log.Fatalf("Memory query failed: %v", err)
+		log.Printf("Warning: could not check for OOMKilled events: %v\n", err)
+	}
+
+	if oomKilled {
+		colorRed := "\033[31m"
+		colorReset := "\033[0m"
+		fmt.Println(string(colorRed))
+		log.Println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! WARNING !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+		log.Printf("! OOMKilled event detected for pod: %s", oomPodName)
+		log.Println("! Memory recommendation based on Prometheus metrics will be INACCURATE.")
+		log.Println("! Generating an aggressive recommendation based on the current limit.")
+		log.Println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+		fmt.Println(string(colorReset))
+
+		if currentMemLimit != nil {
+			newLimitValue := currentMemLimit.Value() * 3 / 2
+			memRecommendation = resource.NewQuantity(newLimitValue, resource.BinarySI)
+			log.Printf("Current memory limit is %s. Aggressive recommendation: %s\n", currentMemLimit.String(), formatMemoryHumanReadable(memRecommendation))
+		} else {
+			log.Println("Current memory limit is not set. Recommending a safe default of 1Gi.")
+			memRecommendation = resource.NewQuantity(1024*1024*1024, resource.BinarySI)
+		}
+
+	} else {
+		log.Println("No OOMKilled events found. Proceeding with Prometheus-based analysis for memory.")
+		memQuery := fmt.Sprintf(`max(quantile_over_time(0.99, sum(container_memory_working_set_bytes{namespace="%s", pod=~"^%s-.*", container!=""}) by (pod, namespace)[%s:]))`, cfg.Namespace, cfg.Deployment, cfg.Range)
+		memP99, err := executePrometheusQuery(ctx, promAPI, memQuery)
+		if err != nil {
+			log.Fatalf("Memory query failed: %v", err)
+		}
+		if memP99 == 0 {
+			log.Println("No memory usage data found in Prometheus.")
+		}
+		memRecommendationBytes := memP99 * 1.2
+		memRecommendation = resource.NewQuantity(int64(memRecommendationBytes), resource.BinarySI)
 	}
 
 	cpuRequestQuery := fmt.Sprintf(`max(quantile_over_time(0.90, sum(rate(container_cpu_usage_seconds_total{namespace="%s", pod=~"^%s-.*", container!=""}[5m])) by (pod, namespace)[%s:1m]))`, cfg.Namespace, cfg.Deployment, cfg.Range)
@@ -138,24 +165,21 @@ func main() {
 	if err != nil {
 		log.Fatalf("CPU request query failed: %v", err)
 	}
-
 	cpuLimitQuery := fmt.Sprintf(`max(quantile_over_time(0.99, sum(rate(container_cpu_usage_seconds_total{namespace="%s", pod=~"^%s-.*", container!=""}[5m])) by (pod, namespace)[%s:1m]))`, cfg.Namespace, cfg.Deployment, cfg.Range)
 	cpuP99, err := executePrometheusQuery(ctx, promAPI, cpuLimitQuery)
 	if err != nil {
 		log.Fatalf("CPU limit query failed: %v", err)
 	}
 
-	if memP99 == 0 && cpuP90 == 0 && cpuP99 == 0 {
+	if memRecommendation.IsZero() && cpuP90 == 0 && cpuP99 == 0 {
 		log.Printf("No metric data found in Prometheus for this deployment over the last %s.", cfg.Range)
 		os.Exit(0)
 	}
 
-	memRecommendationBytes := memP99 * 1.2
-	memRecommendation := resource.NewQuantity(int64(memRecommendationBytes), resource.BinarySI)
 	cpuRequestRecommendation := resource.NewMilliQuantity(int64(cpuP90*1000), resource.DecimalSI)
 	cpuLimitRecommendation := resource.NewMilliQuantity(int64(cpuP99*1000), resource.DecimalSI)
 
-	log.Printf("Calculated recommendations: Memory=%s, CPU Request=%s, CPU Limit=%s", formatMemoryHumanReadable(memRecommendation), cpuRequestRecommendation.String(), cpuLimitRecommendation.String())
+	log.Printf("Final recommendations: Memory=%s, CPU Request=%s, CPU Limit=%s", formatMemoryHumanReadable(memRecommendation), cpuRequestRecommendation.String(), cpuLimitRecommendation.String())
 
 	var targetContainerName string
 	if cfg.Container != "" {
@@ -248,6 +272,50 @@ func initConfig() {
 	}
 }
 
+func checkForOOMKilledEvents(ctx context.Context, clientset *kubernetes.Clientset, d *appsv1.Deployment) (bool, string, *resource.Quantity, error) {
+	selector, err := metav1.LabelSelectorAsSelector(d.Spec.Selector)
+	if err != nil {
+		return false, "", nil, fmt.Errorf("failed to build selector from deployment spec: %w", err)
+	}
+	podList, err := clientset.CoreV1().Pods(d.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: selector.String(),
+	})
+	if err != nil {
+		return false, "", nil, fmt.Errorf("failed to list pods for deployment: %w", err)
+	}
+	for _, pod := range podList.Items {
+		fieldSelector := fmt.Sprintf("involvedObject.kind=Pod,involvedObject.name=%s,reason=OOMKilled", pod.Name)
+		eventList, err := clientset.CoreV1().Events(d.Namespace).List(ctx, metav1.ListOptions{
+			FieldSelector: fieldSelector,
+		})
+		if err != nil {
+			log.Printf("Warning: could not get events for pod %s: %v", pod.Name, err)
+			continue
+		}
+		if len(eventList.Items) > 0 {
+			var currentLimit *resource.Quantity
+			if len(pod.Spec.Containers) > 0 {
+				containerName := pod.Spec.Containers[0].Name
+				if cfg.Container != "" {
+					containerName = cfg.Container
+				}
+				for _, c := range pod.Spec.Containers {
+					if c.Name == containerName {
+						if c.Resources.Limits != nil {
+							if limit, ok := c.Resources.Limits[v1.ResourceMemory]; ok {
+								currentLimit = &limit
+							}
+						}
+						break
+					}
+				}
+			}
+			return true, pod.Name, currentLimit, nil
+		}
+	}
+	return false, "", nil, nil
+}
+
 func startPortForward(config *rest.Config, clientset *kubernetes.Clientset, namespace, serviceName string, port int, stopCh, readyCh chan struct{}) error {
 	svc, err := clientset.CoreV1().Services(namespace).Get(context.TODO(), serviceName, metav1.GetOptions{})
 	if err != nil {
@@ -293,7 +361,7 @@ func startPortForward(config *rest.Config, clientset *kubernetes.Clientset, name
 }
 
 func executePrometheusQuery(ctx context.Context, api prometheusv1.API, query string) (float64, error) {
-	log.Printf("Executing query to Prometheus\n")
+	log.Printf("Executing query: %s\n", query)
 	result, warnings, err := api.Query(ctx, query, time.Now())
 	if err != nil {
 		return 0, fmt.Errorf("failed to query Prometheus: %w", err)
