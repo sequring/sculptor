@@ -1,9 +1,8 @@
-module github.com/my-user/sculptor-cli
+module github.com/sequring/sculptor
 
 go 1.24.4
 
 require (
-	github.com/BurntSushi/toml v1.5.0
 	github.com/prometheus/client_golang v1.22.0
 	github.com/prometheus/common v0.64.0
 	github.com/spf13/pflag v1.0.6
@@ -11,6 +10,7 @@ require (
 	k8s.io/api v0.33.1
 	k8s.io/apimachinery v0.33.1
 	k8s.io/client-go v0.33.1
+	sigs.k8s.io/yaml v1.4.0
 )
 
 require (
@@ -63,5 +63,4 @@ require (
 	sigs.k8s.io/json v0.0.0-20241010143419-9aa6b5e7a4b3 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.6.0 // indirect
-	sigs.k8s.io/yaml v1.4.0 // indirect
 )
