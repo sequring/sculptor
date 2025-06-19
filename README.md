@@ -33,7 +33,7 @@ If you have Go installed, you can build it from the source:
 ```bash
 git clone https://github.com/sequring/sculptor.git
 cd sculptor
-go build -o sculptor ./main.go
+go build -o sculptor ./cmd/sculptor-cli
 sudo mv ./sculptor /usr/local/bin/
 ```
 
