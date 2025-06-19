@@ -51,12 +51,13 @@ func main() {
 
 	stopCh := make(chan struct{}, 1)
 	readyCh := make(chan struct{})
+	errCh := make(chan error, 1)
 	defer close(stopCh)
 
 	go func() {
 		err := k8sClient.StartPortForward(cfg.Prometheus.Namespace, cfg.Prometheus.Service, cfg.Prometheus.Port, stopCh, readyCh)
 		if err != nil {
-			log.Fatalf("Port-forwarding failed: %v", err)
+			errCh <- fmt.Errorf("port-forwarding failed: %w", err)
 		}
 	}()
 
@@ -65,6 +66,8 @@ func main() {
 		log.Println("Port-forwarding is ready.")
 	case <-time.After(30 * time.Second):
 		log.Fatal("Port-forwarding timed out.")
+	case err := <-errCh:
+		log.Fatalf("Error occurred: %v", err)
 	}
 
 	prometheusURL := fmt.Sprintf("http://localhost:%d", cfg.Prometheus.Port)

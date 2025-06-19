@@ -22,8 +22,9 @@ func NewRecommenderUseCase(k8s DeploymentGateway, prom MetricsGateway) *Recommen
 }
 
 const (
-	spikinessThreshold = 2.0
-	spikinessCPUBuffer = 1.25
+	spikinessThreshold  = 2.0
+	spikinessCPUBuffer  = 1.25
+	oomMemoryMultiplier = 1.5
 )
 
 func (uc *RecommenderUseCase) CalculateForDeployment(ctx context.Context, namespace, deploymentName, targetContainerName, timeRange string) (*entity.Recommendation, string, error) {
@@ -71,7 +72,7 @@ func (uc *RecommenderUseCase) CalculateForDeployment(ctx context.Context, namesp
 	if isOOM {
 		isOOMRecommendation = true
 		if currentLimit != nil {
-			newVal := currentLimit.Value() * 3 / 2
+			newVal := int64(float64(currentLimit.Value()) * oomMemoryMultiplier)
 			memRecommendation = resource.NewQuantity(newVal, resource.BinarySI)
 		} else {
 			memRecommendation = resource.NewQuantity(1024*1024*1024, resource.BinarySI)
