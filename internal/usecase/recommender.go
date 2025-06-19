@@ -21,6 +21,11 @@ func NewRecommenderUseCase(k8s DeploymentGateway, prom MetricsGateway) *Recommen
 	}
 }
 
+const (
+	spikinessThreshold = 2.0
+	spikinessCPUBuffer = 1.25
+)
+
 func (uc *RecommenderUseCase) CalculateForDeployment(ctx context.Context, namespace, deploymentName, targetContainerName, timeRange string) (*entity.Recommendation, string, error) {
 	d, err := uc.k8sGateway.GetDeployment(ctx, namespace, deploymentName)
 	if err != nil {
@@ -89,13 +94,35 @@ func (uc *RecommenderUseCase) CalculateForDeployment(ctx context.Context, namesp
 	if err != nil {
 		return nil, "", err
 	}
+	cpuP50, err := uc.promGateway.GetCPUMedianMetrics(ctx, namespace, deploymentName, timeRange)
+	if err != nil {
+		return nil, "", err
+	}
+
+	cpuLimitValue := cpuP99
+	isSpiky := false
+
+	if cpuP50 > 0 {
+		spikinessRatio := cpuP99 / cpuP50
+		if spikinessRatio > spikinessThreshold {
+			isSpiky = true
+			cpuLimitValue *= spikinessCPUBuffer
+			log.Printf(
+				"High CPU spikiness detected (P99/P50 ratio: %.2f > threshold: %.2f). Applying %.0f%% extra buffer to CPU limit.",
+				spikinessRatio,
+				spikinessThreshold,
+				(spikinessCPUBuffer-1)*100,
+			)
+		}
+	}
 
 	rec := &entity.Recommendation{
 		Memory:      memRecommendation,
 		IsOOMKilled: isOOMRecommendation,
 		CPU: &entity.CPURecommendation{
-			Request: resource.NewMilliQuantity(int64(cpuP90*1000), resource.DecimalSI),
-			Limit:   resource.NewMilliQuantity(int64(cpuP99*1000), resource.DecimalSI),
+			Request:          resource.NewMilliQuantity(int64(cpuP90*1000), resource.DecimalSI),
+			Limit:            resource.NewMilliQuantity(int64(cpuP99*1000), resource.DecimalSI),
+			SpikinessWarning: isSpiky,
 		},
 	}
 

@@ -37,6 +37,15 @@ func (p *YAMLPresenter) Render(rec *entity.Recommendation, targetContainerName s
 		warningHeader += fmt.Sprintf("%s", colorReset)
 	}
 
+	if rec.CPU.SpikinessWarning {
+		colorYellow := "\033[33m"
+		colorReset := "\033[0m"
+		spikyWarning := fmt.Sprintf("%s", colorYellow)
+		spikyWarning += "--- INFO: High CPU spikiness detected. An extra buffer has been added to the CPU limit. ---\n"
+		spikyWarning += fmt.Sprintf("%s", colorReset)
+		warningHeader += spikyWarning
+	}
+
 	memString := formatMemoryHumanReadable(rec.Memory)
 	prettyMem, err := resource.ParseQuantity(memString)
 	if err != nil {

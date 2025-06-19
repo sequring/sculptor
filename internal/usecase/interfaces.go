@@ -16,4 +16,5 @@ type MetricsGateway interface {
 	GetMemoryMetrics(ctx context.Context, namespace, deploymentName, timeRange string) (float64, error)
 	GetCPURequestMetrics(ctx context.Context, namespace, deploymentName, timeRange string) (float64, error)
 	GetCPULimitMetrics(ctx context.Context, namespace, deploymentName, timeRange string) (float64, error)
+	GetCPUMedianMetrics(ctx context.Context, namespace, deploymentName, timeRange string) (float64, error)
 }
