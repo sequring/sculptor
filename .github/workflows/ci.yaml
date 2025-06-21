@@ -36,11 +36,6 @@ jobs:
         run: go mod download
 
       - name: Run tests with coverage
-        run: go test -v -race -coverprofile=coverage.out ./...
+        run: go test -v -race ./...
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
-        with:
-          file: ./coverage.out
-          flags: unittests
-          name: codecov-coverage
+
