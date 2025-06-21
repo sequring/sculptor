@@ -16,6 +16,7 @@ type Data struct {
 	Deployment string
 	Container  string
 	Silent     bool
+	Verbose    bool
 	Prometheus struct {
 		Namespace string
 		Service   string
@@ -33,6 +34,7 @@ func Load() (*Data, error) {
 	pflag.String("container", "", "The name of the container to apply resources to (defaults to the first container)")
 	pflag.Bool("version", false, "Print version information and exit")
 	pflag.Bool("silent", false, "Disable all logs and logo output, only show the YAML output")
+	pflag.Bool("verbose", false, "Enable verbose logging")
 
 	viper.BindPFlag("kubeconfig", pflag.Lookup("kubeconfig"))
 	viper.BindPFlag("context", pflag.Lookup("context"))
@@ -41,7 +43,7 @@ func Load() (*Data, error) {
 	viper.BindPFlag("deployment", pflag.Lookup("deployment"))
 	viper.BindPFlag("container", pflag.Lookup("container"))
 	viper.BindPFlag("silent", pflag.Lookup("silent"))
-
+	viper.BindPFlag("verbose", pflag.Lookup("verbose"))
 	pflag.Parse()
 
 	configPath, _ := pflag.CommandLine.GetString("config")

@@ -54,7 +54,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	k8sClient, err := k8s_gateway.NewClient(cfg)
+	k8sClient, err := k8s_gateway.NewClient(cfg, logger)
 	if err != nil {
 		logger.Error("Failed to create Kubernetes client", "error", err)
 		os.Exit(1)
@@ -66,7 +66,7 @@ func main() {
 	defer close(stopCh)
 
 	go func() {
-		err := k8sClient.StartPortForward(cfg.Prometheus.Namespace, cfg.Prometheus.Service, cfg.Prometheus.Port, stopCh, readyCh)
+		err := k8sClient.StartPortForward(logger, cfg.Prometheus.Namespace, cfg.Prometheus.Service, cfg.Prometheus.Port, stopCh, readyCh)
 		if err != nil {
 			errCh <- fmt.Errorf("port-forwarding failed: %w", err)
 		}
