@@ -48,6 +48,11 @@ func (g *Gateway) GetCPUMedianMetrics(ctx context.Context, ns, deploymentName, c
 	return g.executeQuery(ctx, "P50 CPU for Spikiness", query, containerName)
 }
 
+func (g *Gateway) GetInitContainerMemoryMetrics(ctx context.Context, ns, deploymentName, containerName, timeRange string) (float64, error) {
+	query := fmt.Sprintf(`max_over_time(container_memory_max_usage_bytes{namespace="%s", pod=~"^%s-.*", container="%s"}[%s])`, ns, deploymentName, containerName, timeRange)
+	return g.executeQuery(ctx, "Max Memory Usage for Init Container", query, containerName)
+}
+
 func (g *Gateway) executeQuery(ctx context.Context, queryName string, query string, containerName string) (float64, error) {
 	g.logger.Debug("Fetching metrics from Prometheus", "queryName", queryName, "container", containerName, "query", query)
 
