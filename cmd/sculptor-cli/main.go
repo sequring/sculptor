@@ -24,26 +24,26 @@ var (
 )
 
 func main() {
-	// Load configuration
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("Error loading config", "error", err)
 		os.Exit(1)
 	}
 
-	// Set up logger based on silent flag
 	var logger *slog.Logger
+	logLevel := slog.LevelInfo
+	if cfg.Verbose {
+		logLevel = slog.LevelDebug
+	}
+
 	if cfg.Silent {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	} else {
-		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-			Level: slog.LevelInfo,
-		}))
+		handlerOpts := &slog.HandlerOptions{Level: logLevel}
+		logger = slog.New(slog.NewTextHandler(os.Stderr, handlerOpts))
 	}
 
-	// Initialize the YAML presenter
-	yamlPresenter := presenter.NewYAMLPresenter(logger)
-	yamlPresenter.PrintLogo()
+	presenter.PrintLogo(cfg.Silent)
 
 	showVersion, _ := pflag.CommandLine.GetBool("version")
 	if showVersion {
@@ -54,21 +54,19 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Initialize Kubernetes client
-	k8sClient, err := k8s_gateway.NewClient(cfg, logger)
+	k8sClient, err := k8s_gateway.NewClient(cfg)
 	if err != nil {
 		logger.Error("Failed to create Kubernetes client", "error", err)
 		os.Exit(1)
 	}
 
-	// Start port forwarding
 	stopCh := make(chan struct{}, 1)
 	readyCh := make(chan struct{})
 	errCh := make(chan error, 1)
 	defer close(stopCh)
 
 	go func() {
-		err := k8sClient.StartPortForward(logger, cfg.Prometheus.Namespace, cfg.Prometheus.Service, cfg.Prometheus.Port, stopCh, readyCh)
+		err := k8sClient.StartPortForward(cfg.Prometheus.Namespace, cfg.Prometheus.Service, cfg.Prometheus.Port, stopCh, readyCh)
 		if err != nil {
 			errCh <- fmt.Errorf("port-forwarding failed: %w", err)
 		}
@@ -81,11 +79,10 @@ func main() {
 		logger.Error("Port-forwarding timed out")
 		os.Exit(1)
 	case err := <-errCh:
-		logger.Error("Error occurred", "error", err)
+		logger.Error("Error during port-forward setup", "error", err)
 		os.Exit(1)
 	}
 
-	// Initialize Prometheus gateway
 	prometheusURL := fmt.Sprintf("http://localhost:%d", cfg.Prometheus.Port)
 	promGateway, err := prom_gateway.NewGateway(prometheusURL, logger)
 	if err != nil {
@@ -93,13 +90,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Initialize use case
 	k8sGateway := k8s_gateway.NewGateway(k8sClient.Clientset, logger)
 	recommender := usecase.NewRecommenderUseCase(k8sGateway, promGateway, logger)
 
-	logger.Info("Analyzing deployment", "deployment", cfg.Deployment, "namespace", cfg.Namespace, "timeRange", cfg.Range)
+	logger.Info("Analyzing deployment", "deployment", cfg.Deployment, "namespace", cfg.Namespace, "range", cfg.Range)
 
-	recommendation, finalContainerName, err := recommender.CalculateForDeployment(
+	recommendations, err := recommender.CalculateForDeployment(
 		context.Background(),
 		cfg.Namespace,
 		cfg.Deployment,
@@ -111,12 +107,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	output, err := yamlPresenter.Render(recommendation, finalContainerName)
+	yamlPresenter := presenter.NewYAMLPresenter(cfg.Silent, os.Stdout)
+	err = yamlPresenter.Render(recommendations)
 	if err != nil {
 		logger.Error("Rendering error", "error", err)
 		os.Exit(1)
 	}
-
-	// Print the output
-	fmt.Println(output)
 }

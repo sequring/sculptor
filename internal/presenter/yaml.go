@@ -2,10 +2,11 @@ package presenter
 
 import (
 	"fmt"
-	"log/slog"
+	"io"
 	"math"
+	"os"
 
-	"github.com/sequring/sculptor/internal/entity"
+	"github.com/sequring/sculptor/internal/usecase"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"sigs.k8s.io/yaml"
@@ -21,89 +22,97 @@ type OutputContainer struct {
 }
 
 type YAMLPresenter struct {
-	logger *slog.Logger
+	silent bool
+	writer io.Writer
 }
 
-func NewYAMLPresenter(logger *slog.Logger) *YAMLPresenter {
+func NewYAMLPresenter(silent bool, writer io.Writer) *YAMLPresenter {
 	return &YAMLPresenter{
-		logger: logger,
+		silent: silent,
+		writer: writer,
 	}
 }
 
-func (p *YAMLPresenter) Render(rec *entity.Recommendation, targetContainerName string) (string, error) {
-	var warningHeader string
-	if rec.IsOOMKilled {
-		colorRed := "\033[31m"
-		colorReset := "\033[0m"
-		warningHeader = fmt.Sprintf("%s\n", colorRed)
-		warningHeader += "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! WARNING !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
-		warningHeader += "! OOMKilled event detected. Memory recommendation is aggressive.\n"
-		warningHeader += "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
-		warningHeader += fmt.Sprintf("%s", colorReset)
+func (p *YAMLPresenter) Render(recs []usecase.NamedRecommendation) error {
+	if len(recs) == 0 {
+		if !p.silent {
+			fmt.Fprintln(p.writer, "No recommendations could be generated. This may be due to a lack of metrics data.")
+		}
+		return nil
 	}
 
-	if rec.CPU.SpikinessWarning {
-		colorYellow := "\033[33m"
-		colorReset := "\033[0m"
-		spikyWarning := fmt.Sprintf("%s", colorYellow)
-		spikyWarning += "--- INFO: High CPU spikiness detected. An extra buffer has been added to the CPU limit. ---\n"
-		spikyWarning += fmt.Sprintf("%s", colorReset)
-		warningHeader += spikyWarning
+	var allWarnings []string
+	var outputContainers []OutputContainer
+
+	for _, rec := range recs {
+		if rec.Recommendation.IsOOMKilled {
+			msg := fmt.Sprintf("OOMKilled event detected for container '%s'.", rec.ContainerName)
+			allWarnings = append(allWarnings, msg)
+		}
+		if rec.Recommendation.CPU.SpikinessWarning {
+			msg := fmt.Sprintf("High CPU spikiness detected for container '%s'.", rec.ContainerName)
+			allWarnings = append(allWarnings, msg)
+		}
+
+		memString := formatMemoryHumanReadable(rec.Recommendation.Memory)
+		prettyMem, err := resource.ParseQuantity(memString)
+		if err != nil {
+			return fmt.Errorf("internal error parsing memory for container %s: %w", rec.ContainerName, err)
+		}
+
+		prettyCPUReq, err := resource.ParseQuantity(rec.Recommendation.CPU.Request.String())
+		if err != nil {
+			return fmt.Errorf("internal error parsing CPU request for container %s: %w", rec.ContainerName, err)
+		}
+
+		prettyCPULim, err := resource.ParseQuantity(rec.Recommendation.CPU.Limit.String())
+		if err != nil {
+			return fmt.Errorf("internal error parsing CPU limit for container %s: %w", rec.ContainerName, err)
+		}
+
+		container := OutputContainer{
+			Name: rec.ContainerName,
+			Resources: v1.ResourceRequirements{
+				Requests: v1.ResourceList{
+					v1.ResourceCPU:    prettyCPUReq,
+					v1.ResourceMemory: prettyMem,
+				},
+				Limits: v1.ResourceList{
+					v1.ResourceCPU:    prettyCPULim,
+					v1.ResourceMemory: prettyMem,
+				},
+			},
+		}
+		outputContainers = append(outputContainers, container)
 	}
 
-	if rec.IsOOMKilled || rec.CPU.SpikinessWarning {
-		p.logger.Warn("Warning: OOMKilled or CPU spikiness detected. Review recommendations carefully.")
-	}
-
-	memString := formatMemoryHumanReadable(rec.Memory)
-	prettyMem, err := resource.ParseQuantity(memString)
-	if err != nil {
-		return "", fmt.Errorf("internal error parsing pretty memory: %w", err)
-	}
-
-	prettyCPUReq, err := resource.ParseQuantity(rec.CPU.Request.String())
-	if err != nil {
-		return "", fmt.Errorf("internal error parsing pretty CPU request: %w", err)
-	}
-
-	prettyCPULim, err := resource.ParseQuantity(rec.CPU.Limit.String())
-	if err != nil {
-		return "", fmt.Errorf("internal error parsing pretty CPU limit: %w", err)
+	if p.silent {
+		if len(allWarnings) > 0 {
+			fmt.Fprintln(os.Stderr, "Warning: OOMKilled events or CPU spikiness detected. Review recommendations carefully.")
+		}
+	} else {
+		for _, warning := range allWarnings {
+			colorYellow := "\033[33m"
+			colorReset := "\033[0m"
+			fmt.Fprintf(p.writer, "%s--- WARNING: %s ---%s\n", colorYellow, warning, colorReset)
+		}
 	}
 
 	outputData := OutputYAML{
-		Containers: []OutputContainer{
-			{
-				Name: targetContainerName,
-				Resources: v1.ResourceRequirements{
-					Requests: v1.ResourceList{
-						v1.ResourceCPU:    prettyCPUReq,
-						v1.ResourceMemory: prettyMem,
-					},
-					Limits: v1.ResourceList{
-						v1.ResourceCPU:    prettyCPULim,
-						v1.ResourceMemory: prettyMem,
-					},
-				},
-			},
-		},
+		Containers: outputContainers,
 	}
 
 	yamlBytes, err := yaml.Marshal(outputData)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal snippet to YAML: %w", err)
+		return fmt.Errorf("failed to marshal snippet to YAML: %w", err)
 	}
 
-	yamlHeader := "\n--- Recommended Resource Snippet (paste into your Deployment YAML) ---\n"
-
-	finalOutput := ""
-	if warningHeader != "" {
-		finalOutput += warningHeader
+	if !p.silent {
+		fmt.Fprintln(p.writer, "\n--- Recommended Resource Snippet (paste into your Deployment YAML) ---")
 	}
-	finalOutput += yamlHeader
-	finalOutput += string(yamlBytes)
 
-	return finalOutput, nil
+	_, err = p.writer.Write(yamlBytes)
+	return err
 }
 
 func formatMemoryHumanReadable(q *resource.Quantity) string {
@@ -113,14 +122,12 @@ func formatMemoryHumanReadable(q *resource.Quantity) string {
 		Gi = 1024 * Mi
 	)
 
-	bytes := q.Value()
-	if bytes == 0 {
+	if q == nil || q.IsZero() {
 		return "0"
 	}
 
+	bytes := q.Value()
 	switch {
-	//case bytes >= Gi:
-	//	return fmt.Sprintf("%.0fGi", math.Ceil(float64(bytes)/Gi))
 	case bytes >= Mi:
 		return fmt.Sprintf("%.0fMi", math.Ceil(float64(bytes)/Mi))
 	case bytes >= Ki:
@@ -128,21 +135,4 @@ func formatMemoryHumanReadable(q *resource.Quantity) string {
 	default:
 		return fmt.Sprintf("%dB", bytes)
 	}
-}
-
-func (p *YAMLPresenter) PrintLogo() {
-	logo := `
-  ██████  ▄████▄   █    ██  ██▓     ██▓███  ▄▄▄█████▓ ▒█████   ██▀███  
-▒██    ▒ ▒██▀ ▀█   ██  ▓██▒▓██▒    ▓██░  ██▒▓  ██▒ ▓▒▒██▒  ██▒▓██ ▒ ██▒
-░ ▓██▄   ▒▓█    ▄ ▓██  ▒██░▒██░    ▓██░ ██▓▒▒ ▓██░ ▒░▒██░  ██▒▓██ ░▄█ ▒
-  ▒   ██▒▒▓▓▄ ▄██▒▓▓█  ░██░▒██░    ▒██▄█▓▒ ▒░ ▓██▓ ░ ▒██   ██░▒██▀▀█▄  
-▒██████▒▒▒ ▓███▀ ░▒▒█████▓ ░██████▒▒██▒ ░  ░  ▒██▒ ░ ░ ████▓▒░░██▓ ▒██▒
-▒ ▒▓▒ ▒ ░░ ░▒ ▒  ░░▒▓▒ ▒ ▒ ░ ▒░▓  ░▒▓▒░ ░  ░  ▒ ░░   ░ ▒░▒░▒░ ░ ▒▓ ░▒▓░
-░ ░▒  ░ ░  ░  ▒   ░░▒░ ░ ░ ░ ░ ▒  ░░▒ ░         ░      ░ ▒ ▒░   ░▒ ░ ▒░
-░  ░  ░  ░         ░░░ ░ ░   ░ ░   ░░         ░      ░ ░ ░ ▒    ░░   ░ 
-      ░  ░ ░         ░         ░  ░                      ░ ░     ░     
-         ░                                      
-   Copyright © 2025 Valentyn Nastenko
-`
-	p.logger.Info(logo)
 }
