@@ -13,15 +13,19 @@ import (
 )
 
 type Gateway struct {
-	api prometheusv1.API
+	api    prometheusv1.API
+	silent bool
 }
 
-func NewGateway(address string) (*Gateway, error) {
+func NewGateway(address string, silent bool) (*Gateway, error) {
 	client, err := promapi.NewClient(promapi.Config{Address: address})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create prometheus client: %w", err)
 	}
-	return &Gateway{api: prometheusv1.NewAPI(client)}, nil
+	return &Gateway{
+		api:    prometheusv1.NewAPI(client),
+		silent: silent,
+	}, nil
 }
 
 func (g *Gateway) GetMemoryMetrics(ctx context.Context, ns, name, timeRange string) (float64, error) {
@@ -45,13 +49,15 @@ func (g *Gateway) GetCPUMedianMetrics(ctx context.Context, ns, name, timeRange s
 }
 
 func (g *Gateway) executeQuery(ctx context.Context, queryName string, query string) (float64, error) {
-	log.Printf("Fetching %s metrics from Prometheus...", queryName)
+	if !g.silent {
+		log.Printf("Fetching %s metrics from Prometheus...", queryName)
+	}
 
 	result, warnings, err := g.api.Query(ctx, query, time.Now())
 	if err != nil {
 		return 0, fmt.Errorf("failed to query Prometheus for %s: %w", queryName, err)
 	}
-	if len(warnings) > 0 {
+	if !g.silent && len(warnings) > 0 {
 		log.Printf("Prometheus query for %s returned warnings: %v\n", queryName, warnings)
 	}
 

@@ -24,10 +24,12 @@ import (
 type Client struct {
 	Clientset  *kubernetes.Clientset
 	RESTConfig *rest.Config
+	silent     bool
 }
 
 type Gateway struct {
 	clientset *kubernetes.Clientset
+	silent    bool
 }
 
 func NewClient(cfg *config.Data) (*Client, error) {
@@ -47,11 +49,18 @@ func NewClient(cfg *config.Data) (*Client, error) {
 		return nil, fmt.Errorf("failed to create Kubernetes clientset: %w", err)
 	}
 
-	return &Client{Clientset: clientset, RESTConfig: restConfig}, nil
+	return &Client{
+		Clientset:  clientset, 
+		RESTConfig: restConfig,
+		silent:     cfg.Silent,
+	}, nil
 }
 
-func NewGateway(clientset *kubernetes.Clientset) *Gateway {
-	return &Gateway{clientset: clientset}
+func NewGateway(clientset *kubernetes.Clientset, silent bool) *Gateway {
+	return &Gateway{
+		clientset: clientset,
+		silent:    silent,
+	}
 }
 
 func (g *Gateway) GetDeployment(ctx context.Context, namespace, name string) (*appsv1.Deployment, error) {
@@ -129,7 +138,9 @@ func (c *Client) StartPortForward(namespace, serviceName string, port int, stopC
 		return fmt.Errorf("no running pods found for service %s", serviceName)
 	}
 
-	log.Printf("Starting port-forward to pod '%s' for service '%s'...\n", targetPod.Name, serviceName)
+	if !c.silent {
+		log.Printf("Starting port-forward to pod '%s' for service '%s'...\n", targetPod.Name, serviceName)
+	}
 
 	path := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/portforward", namespace, targetPod.Name)
 	hostIP := strings.TrimLeft(c.RESTConfig.Host, "https://")

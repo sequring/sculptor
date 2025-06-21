@@ -76,3 +76,5 @@ Thumbs.db
 logs/*
 # Temporary files
 *.tmp
+
+sculptor

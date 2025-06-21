@@ -3,6 +3,7 @@ package presenter
 import (
 	"fmt"
 	"math"
+	"os"
 
 	"github.com/sequring/sculptor/internal/entity"
 	v1 "k8s.io/api/core/v1"
@@ -19,31 +20,43 @@ type OutputContainer struct {
 	Resources v1.ResourceRequirements `yaml:"resources"`
 }
 
-type YAMLPresenter struct{}
+type YAMLPresenter struct {
+	Silent bool
+}
 
-func NewYAMLPresenter() *YAMLPresenter {
-	return &YAMLPresenter{}
+func NewYAMLPresenter(silent bool) *YAMLPresenter {
+	return &YAMLPresenter{
+		Silent: silent,
+	}
 }
 
 func (p *YAMLPresenter) Render(rec *entity.Recommendation, targetContainerName string) (string, error) {
 	var warningHeader string
-	if rec.IsOOMKilled {
-		colorRed := "\033[31m"
-		colorReset := "\033[0m"
-		warningHeader = fmt.Sprintf("%s\n", colorRed)
-		warningHeader += "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! WARNING !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
-		warningHeader += "! OOMKilled event detected. Memory recommendation is aggressive.\n"
-		warningHeader += "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
-		warningHeader += fmt.Sprintf("%s", colorReset)
-	}
+	if !p.Silent {
+		if rec.IsOOMKilled {
+			colorRed := "\033[31m"
+			colorReset := "\033[0m"
+			warningHeader = fmt.Sprintf("%s\n", colorRed)
+			warningHeader += "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! WARNING !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+			warningHeader += "! OOMKilled event detected. Memory recommendation is aggressive.\n"
+			warningHeader += "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+			warningHeader += fmt.Sprintf("%s", colorReset)
+		}
 
-	if rec.CPU.SpikinessWarning {
-		colorYellow := "\033[33m"
-		colorReset := "\033[0m"
-		spikyWarning := fmt.Sprintf("%s", colorYellow)
-		spikyWarning += "--- INFO: High CPU spikiness detected. An extra buffer has been added to the CPU limit. ---\n"
-		spikyWarning += fmt.Sprintf("%s", colorReset)
-		warningHeader += spikyWarning
+		if rec.CPU.SpikinessWarning {
+			colorYellow := "\033[33m"
+			colorReset := "\033[0m"
+			spikyWarning := fmt.Sprintf("%s", colorYellow)
+			spikyWarning += "--- INFO: High CPU spikiness detected. An extra buffer has been added to the CPU limit. ---\n"
+			spikyWarning += fmt.Sprintf("%s", colorReset)
+			warningHeader += spikyWarning
+		}
+	} else {
+		// In silent mode, we don't want any warning headers or info messages
+		if rec.IsOOMKilled || rec.CPU.SpikinessWarning {
+			// Just log to stderr in silent mode if there are warnings
+			fmt.Fprintf(os.Stderr, "Warning: OOMKilled or CPU spikiness detected. Review recommendations carefully.\n")
+		}
 	}
 
 	memString := formatMemoryHumanReadable(rec.Memory)
@@ -85,7 +98,10 @@ func (p *YAMLPresenter) Render(rec *entity.Recommendation, targetContainerName s
 		return "", fmt.Errorf("failed to marshal snippet to YAML: %w", err)
 	}
 
-	yamlHeader := "\n--- Recommended Resource Snippet (paste into your Deployment YAML) ---\n"
+	var yamlHeader string
+	if !p.Silent {
+		yamlHeader = "\n--- Recommended Resource Snippet (paste into your Deployment YAML) ---\n"
+	}
 
 	finalOutput := ""
 	if warningHeader != "" {
@@ -122,6 +138,9 @@ func formatMemoryHumanReadable(q *resource.Quantity) string {
 }
 
 func (p *YAMLPresenter) PrintLogo() {
+	if p.Silent {
+		return
+	}
 	logo := `
   ██████  ▄████▄   █    ██  ██▓     ██▓███  ▄▄▄█████▓ ▒█████   ██▀███  
 ▒██    ▒ ▒██▀ ▀█   ██  ▓██▒▓██▒    ▓██░  ██▒▓  ██▒ ▓▒▒██▒  ██▒▓██ ▒ ██▒

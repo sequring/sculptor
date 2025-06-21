@@ -151,6 +151,7 @@ containers:
 | `--context`    | The name of the kubeconfig context to use. Overrides the config file.                    | Active context                   |
 | `--kubeconfig` | The absolute path to the kubeconfig file. Overrides the config file.                     | `~/.kube/config`                 |
 | `--config`     | The path to the `config.toml` file.                                                      | `config.toml`                    |
+| `--silent`     | Disable all logs and logo output, only show the YAML output.                             | `false`                          |
 
 ---
 

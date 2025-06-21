@@ -23,14 +23,15 @@ var (
 )
 
 func main() {
-	yamlPresenter := presenter.NewYAMLPresenter()
-	yamlPresenter.PrintLogo()
-
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("Config error: %v", err)
 	}
 
+	yamlPresenter := presenter.NewYAMLPresenter(cfg.Silent)
+	if !cfg.Silent {
+		yamlPresenter.PrintLogo()
+	}
 	showVersion, _ := pflag.CommandLine.GetBool("version")
 	if showVersion {
 		fmt.Printf("sculptor-cli version %s\n", version)
@@ -38,10 +39,6 @@ func main() {
 		fmt.Printf("built on: %s\n", date)
 		fmt.Printf("built by: %s\n", builtBy)
 		os.Exit(0)
-	}
-
-	if cfg == nil {
-		log.Fatal("Could not load configuration.")
 	}
 
 	k8sClient, err := k8s_gateway.NewClient(cfg)
@@ -63,23 +60,42 @@ func main() {
 
 	select {
 	case <-readyCh:
-		log.Println("Port-forwarding is ready.")
+		if !cfg.Silent {
+			log.Println("Port-forwarding is ready.")
+		}
 	case <-time.After(30 * time.Second):
-		log.Fatal("Port-forwarding timed out.")
+		if cfg.Silent {
+			fmt.Fprintln(os.Stderr, "Error: Port-forwarding timed out")
+		} else {
+			log.Fatal("Port-forwarding timed out.")
+		}
+		os.Exit(1)
 	case err := <-errCh:
-		log.Fatalf("Error occurred: %v", err)
+		if cfg.Silent {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		} else {
+			log.Fatalf("Error occurred: %v", err)
+		}
+		os.Exit(1)
 	}
 
 	prometheusURL := fmt.Sprintf("http://localhost:%d", cfg.Prometheus.Port)
-	promGateway, err := prom_gateway.NewGateway(prometheusURL)
+	promGateway, err := prom_gateway.NewGateway(prometheusURL, cfg.Silent)
 	if err != nil {
-		log.Fatalf("Prometheus client error: %v", err)
+		if cfg.Silent {
+			fmt.Fprintf(os.Stderr, "Error creating Prometheus client: %v\n", err)
+		} else {
+			log.Fatalf("Prometheus client error: %v", err)
+		}
+		os.Exit(1)
 	}
 
-	k8sGateway := k8s_gateway.NewGateway(k8sClient.Clientset)
-	recommender := usecase.NewRecommenderUseCase(k8sGateway, promGateway)
+	k8sGateway := k8s_gateway.NewGateway(k8sClient.Clientset, cfg.Silent)
+	recommender := usecase.NewRecommenderUseCase(k8sGateway, promGateway, cfg.Silent)
 
-	log.Printf("Analyzing deployment '%s' in namespace '%s' over the last %s...\n", cfg.Deployment, cfg.Namespace, cfg.Range)
+	if !cfg.Silent {
+		log.Printf("Analyzing deployment '%s' in namespace '%s' over the last %s...\n", cfg.Deployment, cfg.Namespace, cfg.Range)
+	}
 
 	recommendation, finalContainerName, err := recommender.CalculateForDeployment(
 		context.Background(),
@@ -89,13 +105,28 @@ func main() {
 		cfg.Range,
 	)
 	if err != nil {
-		log.Fatalf("Calculation error: %v", err)
+		if cfg.Silent {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		} else {
+			log.Fatalf("Calculation error: %v", err)
+		}
+		os.Exit(1)
 	}
 
 	output, err := yamlPresenter.Render(recommendation, finalContainerName)
 	if err != nil {
-		log.Fatalf("Rendering error: %v", err)
+		if cfg.Silent {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		} else {
+			log.Fatalf("Rendering error: %v", err)
+		}
+		os.Exit(1)
 	}
 
-	fmt.Println(output)
+	// In silent mode, we want to print just the YAML output without any additional newlines
+	if cfg.Silent {
+		fmt.Print(output)
+	} else {
+		fmt.Println(output)
+	}
 }

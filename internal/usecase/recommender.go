@@ -12,12 +12,14 @@ import (
 type RecommenderUseCase struct {
 	k8sGateway  DeploymentGateway
 	promGateway MetricsGateway
+	silent     bool
 }
 
-func NewRecommenderUseCase(k8s DeploymentGateway, prom MetricsGateway) *RecommenderUseCase {
+func NewRecommenderUseCase(k8sGateway DeploymentGateway, promGateway MetricsGateway, silent bool) *RecommenderUseCase {
 	return &RecommenderUseCase{
-		k8sGateway:  k8s,
-		promGateway: prom,
+		k8sGateway:  k8sGateway,
+		promGateway: promGateway,
+		silent:     silent,
 	}
 }
 
@@ -57,12 +59,16 @@ func (uc *RecommenderUseCase) CalculateForDeployment(ctx context.Context, namesp
 			}
 			targetContainerName = d.Spec.Template.Spec.Containers[len(d.Spec.Template.Spec.Containers)-1].Name
 		}
-		log.Printf("No --container specified, automatically selected container: '%s'\n", targetContainerName)
+		if !uc.silent {
+			log.Printf("No --container specified, automatically selected container: '%s'\n", targetContainerName)
+		}
 	}
 
-	log.Println("Checking for OOMKilled events...")
+	if !uc.silent {
+		log.Println("Checking for OOMKilled events...")
+	}
 	isOOM, _, currentLimit, err := uc.k8sGateway.CheckForOOMKilledEvents(ctx, d, targetContainerName)
-	if err != nil {
+	if err != nil && !uc.silent {
 		log.Printf("Warning: could not check for OOM events: %v", err)
 	}
 
@@ -78,7 +84,9 @@ func (uc *RecommenderUseCase) CalculateForDeployment(ctx context.Context, namesp
 			memRecommendation = resource.NewQuantity(1024*1024*1024, resource.BinarySI)
 		}
 	} else {
-		log.Println("No OOMKilled events found. Proceeding with Prometheus-based analysis for memory.")
+		if !uc.silent {
+			log.Println("No OOMKilled events found. Proceeding with Prometheus-based analysis for memory.")
+		}
 		memP99, err := uc.promGateway.GetMemoryMetrics(ctx, namespace, deploymentName, timeRange)
 		if err != nil {
 			return nil, "", err
@@ -108,12 +116,14 @@ func (uc *RecommenderUseCase) CalculateForDeployment(ctx context.Context, namesp
 		if spikinessRatio > spikinessThreshold {
 			isSpiky = true
 			cpuLimitValue *= spikinessCPUBuffer
-			log.Printf(
-				"High CPU spikiness detected (P99/P50 ratio: %.2f > threshold: %.2f). Applying %.0f%% extra buffer to CPU limit.",
-				spikinessRatio,
-				spikinessThreshold,
-				(spikinessCPUBuffer-1)*100,
-			)
+			if !uc.silent {
+				log.Printf(
+					"High CPU spikiness detected (P99/P50 ratio: %.2f > threshold: %.2f). Applying %.0f%% extra buffer to CPU limit.",
+					spikinessRatio,
+					spikinessThreshold,
+					(spikinessCPUBuffer-1)*100,
+				)
+			}
 		}
 	}
 
