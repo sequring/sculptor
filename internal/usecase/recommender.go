@@ -12,14 +12,14 @@ import (
 type RecommenderUseCase struct {
 	k8sGateway  DeploymentGateway
 	promGateway MetricsGateway
-	silent     bool
+	silent      bool
 }
 
 func NewRecommenderUseCase(k8sGateway DeploymentGateway, promGateway MetricsGateway, silent bool) *RecommenderUseCase {
 	return &RecommenderUseCase{
 		k8sGateway:  k8sGateway,
 		promGateway: promGateway,
-		silent:     silent,
+		silent:      silent,
 	}
 }
 
@@ -131,8 +131,9 @@ func (uc *RecommenderUseCase) CalculateForDeployment(ctx context.Context, namesp
 		Memory:      memRecommendation,
 		IsOOMKilled: isOOMRecommendation,
 		CPU: &entity.CPURecommendation{
-			Request:          resource.NewMilliQuantity(int64(cpuP90*1000), resource.DecimalSI),
-			Limit:            resource.NewMilliQuantity(int64(cpuP99*1000), resource.DecimalSI),
+			Request: resource.NewMilliQuantity(int64(cpuP90*1000), resource.DecimalSI),
+			Limit:   resource.NewMilliQuantity(int64(cpuLimitValue*1000), resource.DecimalSI),
+
 			SpikinessWarning: isSpiky,
 		},
 	}
