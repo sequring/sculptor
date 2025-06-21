@@ -54,36 +54,48 @@ func main() {
 		os.Exit(0)
 	}
 
-	k8sClient, err := k8s_gateway.NewClient(cfg)
+	var prometheusURL string
+
+	if cfg.Prometheus.URL != "" {
+		prometheusURL = cfg.Prometheus.URL
+		logger.Info("Connecting to Prometheus directly", "url", prometheusURL)
+	} else {
+		logger.Info("Prometheus URL not specified, starting automatic port-forward")
+		k8sClientForPF, err := k8s_gateway.NewClient(cfg, logger)
+		if err != nil {
+			logger.Error("Failed to create Kubernetes client for port-forward", "error", err)
+			os.Exit(1)
+		}
+		stopCh := make(chan struct{}, 1)
+		readyCh := make(chan struct{})
+		errCh := make(chan error, 1)
+		defer close(stopCh)
+
+		go func() {
+			err := k8sClientForPF.StartPortForward(logger, cfg.Prometheus.Namespace, cfg.Prometheus.Service, cfg.Prometheus.Port, stopCh, readyCh)
+			if err != nil {
+				errCh <- fmt.Errorf("port-forwarding failed: %w", err)
+			}
+		}()
+
+		select {
+		case <-readyCh:
+			logger.Info("Port-forwarding is ready")
+		case <-time.After(30 * time.Second):
+			logger.Error("Port-forwarding timed out")
+			os.Exit(1)
+		case err := <-errCh:
+			logger.Error("Error during port-forward setup", "error", err)
+			os.Exit(1)
+		}
+		prometheusURL = fmt.Sprintf("http://localhost:%d", cfg.Prometheus.Port)
+	}
+
+	k8sClient, err := k8s_gateway.NewClient(cfg, logger)
 	if err != nil {
 		logger.Error("Failed to create Kubernetes client", "error", err)
 		os.Exit(1)
 	}
-
-	stopCh := make(chan struct{}, 1)
-	readyCh := make(chan struct{})
-	errCh := make(chan error, 1)
-	defer close(stopCh)
-
-	go func() {
-		err := k8sClient.StartPortForward(cfg.Prometheus.Namespace, cfg.Prometheus.Service, cfg.Prometheus.Port, stopCh, readyCh)
-		if err != nil {
-			errCh <- fmt.Errorf("port-forwarding failed: %w", err)
-		}
-	}()
-
-	select {
-	case <-readyCh:
-		logger.Info("Port-forwarding is ready")
-	case <-time.After(30 * time.Second):
-		logger.Error("Port-forwarding timed out")
-		os.Exit(1)
-	case err := <-errCh:
-		logger.Error("Error during port-forward setup", "error", err)
-		os.Exit(1)
-	}
-
-	prometheusURL := fmt.Sprintf("http://localhost:%d", cfg.Prometheus.Port)
 	promGateway, err := prom_gateway.NewGateway(prometheusURL, logger)
 	if err != nil {
 		logger.Error("Failed to create Prometheus gateway", "error", err)
@@ -92,25 +104,46 @@ func main() {
 
 	k8sGateway := k8s_gateway.NewGateway(k8sClient.Clientset, logger)
 	recommender := usecase.NewRecommenderUseCase(k8sGateway, promGateway, logger)
-
-	logger.Info("Analyzing deployment", "deployment", cfg.Deployment, "namespace", cfg.Namespace, "range", cfg.Range)
-
-	recommendations, err := recommender.CalculateForDeployment(
-		context.Background(),
-		cfg.Namespace,
-		cfg.Deployment,
-		cfg.Container,
-		cfg.Range,
-	)
-	if err != nil {
-		logger.Error("Calculation error", "error", err)
-		os.Exit(1)
-	}
-
 	yamlPresenter := presenter.NewYAMLPresenter(cfg.Silent, os.Stdout)
-	err = yamlPresenter.Render(recommendations)
-	if err != nil {
-		logger.Error("Rendering error", "error", err)
-		os.Exit(1)
+
+	switch cfg.Target {
+	case "all":
+		logger.Info("Analyzing all containers", "deployment", cfg.Deployment, "namespace", cfg.Namespace, "range", cfg.Range)
+		recommendations, err := recommender.CalculateForAll(context.Background(), cfg.Namespace, cfg.Deployment, cfg.Container, cfg.Range)
+		if err != nil {
+			logger.Error("Error calculating recommendations", "error", err)
+			os.Exit(1)
+		}
+		err = yamlPresenter.RenderAll(recommendations)
+		if err != nil {
+			logger.Error("Error rendering recommendations", "error", err)
+			os.Exit(1)
+		}
+
+	case "init":
+		logger.Info("Analyzing init containers", "deployment", cfg.Deployment, "namespace", cfg.Namespace, "range", cfg.Range)
+		recommendations, err := recommender.CalculateForInitContainers(context.Background(), cfg.Namespace, cfg.Deployment, cfg.Container, cfg.Range)
+		if err != nil {
+			logger.Error("Init container calculation error", "error", err)
+			os.Exit(1)
+		}
+		err = yamlPresenter.RenderInit(recommendations)
+		if err != nil {
+			logger.Error("Init container rendering error", "error", err)
+			os.Exit(1)
+		}
+
+	default: // main
+		logger.Info("Analyzing main containers", "deployment", cfg.Deployment, "namespace", cfg.Namespace, "range", cfg.Range)
+		recommendations, err := recommender.CalculateForDeployment(context.Background(), cfg.Namespace, cfg.Deployment, cfg.Container, cfg.Range)
+		if err != nil {
+			logger.Error("Main container calculation error", "error", err)
+			os.Exit(1)
+		}
+		err = yamlPresenter.Render(recommendations)
+		if err != nil {
+			logger.Error("Main container rendering error", "error", err)
+			os.Exit(1)
+		}
 	}
 }

@@ -15,8 +15,11 @@ type Data struct {
 	Namespace  string
 	Deployment string
 	Container  string
+	Target     string
 	Silent     bool
+	Verbose    bool
 	Prometheus struct {
+		URL       string `mapstructure:"url"`
 		Namespace string
 		Service   string
 		Port      int
@@ -30,9 +33,11 @@ func Load() (*Data, error) {
 	pflag.String("range", "7d", "analysis range for prometheus (e.g. 7d, 24h, 1h)")
 	pflag.String("namespace", "default", "The namespace of the deployment")
 	pflag.String("deployment", "", "The name of the deployment to analyze")
-	pflag.String("container", "", "The name of the container to apply resources to (defaults to the first container)")
+	pflag.String("container", "", "The name of the container to apply resources to (defaults to all containers)")
+	pflag.String("target", "all", "The target for analysis: 'all' for all containers, 'main' for primary containers, or 'init' for init containers")
 	pflag.Bool("version", false, "Print version information and exit")
 	pflag.Bool("silent", false, "Disable all logs and logo output, only show the YAML output")
+	pflag.Bool("verbose", false, "Enable debug logging")
 
 	viper.BindPFlag("kubeconfig", pflag.Lookup("kubeconfig"))
 	viper.BindPFlag("context", pflag.Lookup("context"))
@@ -40,7 +45,9 @@ func Load() (*Data, error) {
 	viper.BindPFlag("namespace", pflag.Lookup("namespace"))
 	viper.BindPFlag("deployment", pflag.Lookup("deployment"))
 	viper.BindPFlag("container", pflag.Lookup("container"))
+	viper.BindPFlag("target", pflag.Lookup("target"))
 	viper.BindPFlag("silent", pflag.Lookup("silent"))
+	viper.BindPFlag("verbose", pflag.Lookup("verbose"))
 
 	pflag.Parse()
 
@@ -61,9 +68,7 @@ func Load() (*Data, error) {
 
 	showVersion, _ := pflag.CommandLine.GetBool("version")
 	if showVersion {
-		// This is a special case handled in main.go, so we can return early.
-		// A more advanced CLI might handle this directly here.
-		return nil, nil // Returning nil, nil signals main to print version and exit.
+		return &cfg, nil
 	}
 
 	if cfg.Deployment == "" {
@@ -73,6 +78,10 @@ func Load() (*Data, error) {
 	validRangeRegex := regexp.MustCompile(`^[1-9][0-9]*[smhdwy]$`)
 	if !validRangeRegex.MatchString(cfg.Range) {
 		return nil, fmt.Errorf("invalid format for 'range': %s. Use Prometheus range format like '1h', '7d', '2w'", cfg.Range)
+	}
+
+	if cfg.Target != "all" && cfg.Target != "main" && cfg.Target != "init" {
+		return nil, fmt.Errorf("invalid value for --target: must be 'all', 'main', or 'init'")
 	}
 
 	return &cfg, nil
