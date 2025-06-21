@@ -11,6 +11,7 @@ Sculptor is a command-line tool for Kubernetes SREs and developers that analyzes
 -   **Flexible CPU Sizing:** Uses p90 for requests (guaranteed CPU) and p99 for limits (burstable CPU).
 -   **GitOps-Ready Output:** Generates a clean YAML snippet of the `resources` block, ready to be pasted into your Deployment manifest.
 -   **Flexible Analysis:** Analyze resource usage over configurable time ranges (e.g., last 7 days, 24 hours, or 1 hour).
+-   **Init Container Support:** Analyze and generate recommendations for both main and init containers.
 -   **Self-Contained:** Automatically port-forwards to your Prometheus instance, requiring zero setup from the user.
 -   **Config-Driven:** Uses a simple `config.toml` file for environment-specific settings.
 
@@ -101,7 +102,17 @@ If your deployment has multiple containers (e.g., an application and a sidecar),
 sculptor --namespace=prod --deployment=web-server --container=php-fpm
 ```
 
-**4. Use a different Kubernetes context:**
+**4. Analyze init containers:**
+
+```bash
+# Analyze only init containers
+sculptor --namespace=prod --deployment=web-server --target=init
+
+# Analyze both main and init containers (default)
+sculptor --namespace=prod --deployment=web-server --target=all
+```
+
+**5. Use a different Kubernetes context:**
 
 ```bash
 sculptor --namespace=staging --deployment=user-service --context=my-staging-cluster
@@ -147,6 +158,7 @@ containers:
 | `--namespace`  | The namespace of the deployment.                                                         | `default`                        |
 | `--deployment` | The name of the deployment to analyze. **(Required)**                                    |                                  |
 | `--container`  | The name of the container to apply resources to.                                         | The first container in the Pod.  |
+| `--target`     | Which containers to analyze: `main`, `init`, or `all`.                                   | `all`                            |
 | `--range`      | The time range for Prometheus analysis (e.g., `7d`, `24h`). Overrides the config file.     | `7d`                             |
 | `--context`    | The name of the kubeconfig context to use. Overrides the config file.                    | Active context                   |
 | `--kubeconfig` | The absolute path to the kubeconfig file. Overrides the config file.                     | `~/.kube/config`                 |
