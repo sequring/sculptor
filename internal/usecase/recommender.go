@@ -3,7 +3,7 @@ package usecase
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 
 	"github.com/sequring/sculptor/internal/entity"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -12,14 +12,14 @@ import (
 type RecommenderUseCase struct {
 	k8sGateway  DeploymentGateway
 	promGateway MetricsGateway
-	silent      bool
+	logger      *slog.Logger
 }
 
-func NewRecommenderUseCase(k8sGateway DeploymentGateway, promGateway MetricsGateway, silent bool) *RecommenderUseCase {
+func NewRecommenderUseCase(k8sGateway DeploymentGateway, promGateway MetricsGateway, logger *slog.Logger) *RecommenderUseCase {
 	return &RecommenderUseCase{
 		k8sGateway:  k8sGateway,
 		promGateway: promGateway,
-		silent:      silent,
+		logger:      logger,
 	}
 }
 
@@ -59,17 +59,13 @@ func (uc *RecommenderUseCase) CalculateForDeployment(ctx context.Context, namesp
 			}
 			targetContainerName = d.Spec.Template.Spec.Containers[len(d.Spec.Template.Spec.Containers)-1].Name
 		}
-		if !uc.silent {
-			log.Printf("No --container specified, automatically selected container: '%s'\n", targetContainerName)
-		}
+		uc.logger.Info("No --container specified, automatically selected container", "container", targetContainerName)
 	}
 
-	if !uc.silent {
-		log.Println("Checking for OOMKilled events...")
-	}
+	uc.logger.Info("Checking for OOMKilled events...")
 	isOOM, _, currentLimit, err := uc.k8sGateway.CheckForOOMKilledEvents(ctx, d, targetContainerName)
-	if err != nil && !uc.silent {
-		log.Printf("Warning: could not check for OOM events: %v", err)
+	if err != nil {
+		uc.logger.Warn("Could not check for OOM events", "error", err)
 	}
 
 	var memRecommendation *resource.Quantity
@@ -84,9 +80,7 @@ func (uc *RecommenderUseCase) CalculateForDeployment(ctx context.Context, namesp
 			memRecommendation = resource.NewQuantity(1024*1024*1024, resource.BinarySI)
 		}
 	} else {
-		if !uc.silent {
-			log.Println("No OOMKilled events found. Proceeding with Prometheus-based analysis for memory.")
-		}
+		uc.logger.Info("No OOMKilled events found. Proceeding with Prometheus-based analysis for memory.")
 		memP99, err := uc.promGateway.GetMemoryMetrics(ctx, namespace, deploymentName, timeRange)
 		if err != nil {
 			return nil, "", err
@@ -116,14 +110,11 @@ func (uc *RecommenderUseCase) CalculateForDeployment(ctx context.Context, namesp
 		if spikinessRatio > spikinessThreshold {
 			isSpiky = true
 			cpuLimitValue *= spikinessCPUBuffer
-			if !uc.silent {
-				log.Printf(
-					"High CPU spikiness detected (P99/P50 ratio: %.2f > threshold: %.2f). Applying %.0f%% extra buffer to CPU limit.",
-					spikinessRatio,
-					spikinessThreshold,
-					(spikinessCPUBuffer-1)*100,
-				)
-			}
+			uc.logger.Info("High CPU spikiness detected",
+				"p99_p50_ratio", spikinessRatio,
+				"threshold", spikinessThreshold,
+				"extra_buffer_percent", (spikinessCPUBuffer-1)*100,
+				"message", "Applying extra buffer to CPU limit")
 		}
 	}
 

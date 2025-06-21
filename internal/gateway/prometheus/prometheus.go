@@ -3,7 +3,7 @@ package prometheus
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"time"
 
@@ -14,17 +14,17 @@ import (
 
 type Gateway struct {
 	api    prometheusv1.API
-	silent bool
+	logger *slog.Logger
 }
 
-func NewGateway(address string, silent bool) (*Gateway, error) {
+func NewGateway(address string, logger *slog.Logger) (*Gateway, error) {
 	client, err := promapi.NewClient(promapi.Config{Address: address})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create prometheus client: %w", err)
 	}
 	return &Gateway{
 		api:    prometheusv1.NewAPI(client),
-		silent: silent,
+		logger: logger,
 	}, nil
 }
 
@@ -49,16 +49,14 @@ func (g *Gateway) GetCPUMedianMetrics(ctx context.Context, ns, name, timeRange s
 }
 
 func (g *Gateway) executeQuery(ctx context.Context, queryName string, query string) (float64, error) {
-	if !g.silent {
-		log.Printf("Fetching %s metrics from Prometheus...", queryName)
-	}
+	g.logger.Info("Fetching metrics from Prometheus", "queryName", queryName)
 
 	result, warnings, err := g.api.Query(ctx, query, time.Now())
 	if err != nil {
 		return 0, fmt.Errorf("failed to query Prometheus for %s: %w", queryName, err)
 	}
-	if !g.silent && len(warnings) > 0 {
-		log.Printf("Prometheus query for %s returned warnings: %v\n", queryName, warnings)
+	if len(warnings) > 0 {
+		g.logger.Warn("Prometheus query returned warnings", "queryName", queryName, "warnings", warnings)
 	}
 
 	vector, ok := result.(model.Vector)
@@ -67,7 +65,7 @@ func (g *Gateway) executeQuery(ctx context.Context, queryName string, query stri
 	}
 
 	if vector.Len() == 0 {
-		log.Printf("Query for %s returned no data.", queryName)
+		g.logger.Info("Query returned no data", "queryName", queryName)
 		return 0, nil
 	}
 

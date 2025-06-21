@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -24,15 +24,15 @@ import (
 type Client struct {
 	Clientset  *kubernetes.Clientset
 	RESTConfig *rest.Config
-	silent     bool
+	logger     *slog.Logger
 }
 
 type Gateway struct {
 	clientset *kubernetes.Clientset
-	silent    bool
+	logger    *slog.Logger
 }
 
-func NewClient(cfg *config.Data) (*Client, error) {
+func NewClient(cfg *config.Data, logger *slog.Logger) (*Client, error) {
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
 	if cfg.Kubeconfig != "" {
 		loadingRules.ExplicitPath = cfg.Kubeconfig
@@ -52,14 +52,14 @@ func NewClient(cfg *config.Data) (*Client, error) {
 	return &Client{
 		Clientset:  clientset, 
 		RESTConfig: restConfig,
-		silent:     cfg.Silent,
+		logger:     logger,
 	}, nil
 }
 
-func NewGateway(clientset *kubernetes.Clientset, silent bool) *Gateway {
+func NewGateway(clientset *kubernetes.Clientset, logger *slog.Logger) *Gateway {
 	return &Gateway{
 		clientset: clientset,
-		silent:    silent,
+		logger:    logger,
 	}
 }
 
@@ -82,7 +82,7 @@ func (g *Gateway) CheckForOOMKilledEvents(ctx context.Context, d *appsv1.Deploym
 		fieldSelector := fmt.Sprintf("involvedObject.kind=Pod,involvedObject.name=%s,reason=OOMKilled", pod.Name)
 		eventList, err := g.clientset.CoreV1().Events(d.Namespace).List(ctx, metav1.ListOptions{FieldSelector: fieldSelector})
 		if err != nil {
-			log.Printf("Warning: could not get events for pod %s: %v", pod.Name, err)
+			g.logger.Warn("Could not get events for pod", "pod", pod.Name, "error", err)
 			continue
 		}
 
@@ -110,7 +110,7 @@ func (g *Gateway) CheckForOOMKilledEvents(ctx context.Context, d *appsv1.Deploym
 	return false, "", nil, nil
 }
 
-func (c *Client) StartPortForward(namespace, serviceName string, port int, stopCh, readyCh chan struct{}) error {
+func (c *Client) StartPortForward(logger *slog.Logger, namespace, serviceName string, port int, stopCh, readyCh chan struct{}) error {
 	svc, err := c.Clientset.CoreV1().Services(namespace).Get(context.TODO(), serviceName, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("could not find service %s in namespace %s: %w", serviceName, namespace, err)
@@ -138,9 +138,7 @@ func (c *Client) StartPortForward(namespace, serviceName string, port int, stopC
 		return fmt.Errorf("no running pods found for service %s", serviceName)
 	}
 
-	if !c.silent {
-		log.Printf("Starting port-forward to pod '%s' for service '%s'...\n", targetPod.Name, serviceName)
-	}
+	logger.Info("Starting port-forward", "pod", targetPod.Name, "service", serviceName)
 
 	path := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/portforward", namespace, targetPod.Name)
 	hostIP := strings.TrimLeft(c.RESTConfig.Host, "https://")
