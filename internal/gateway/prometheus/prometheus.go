@@ -28,49 +28,50 @@ func NewGateway(address string, logger *slog.Logger) (*Gateway, error) {
 	}, nil
 }
 
-func (g *Gateway) GetMemoryMetrics(ctx context.Context, ns, name, timeRange string) (float64, error) {
-	query := fmt.Sprintf(`max(quantile_over_time(0.99, sum(container_memory_working_set_bytes{namespace="%s", pod=~"^%s-.*", container!=""}) by (pod, namespace)[%s:]))`, ns, name, timeRange)
-	return g.executeQuery(ctx, "P99 Memory Usage", query)
+func (g *Gateway) GetMemoryMetrics(ctx context.Context, ns, deploymentName, containerName, timeRange string) (float64, error) {
+	query := fmt.Sprintf(`max(quantile_over_time(0.99, container_memory_working_set_bytes{namespace="%s", pod=~"^%s-.*", container="%s"}[%s:]))`, ns, deploymentName, containerName, timeRange)
+	return g.executeQuery(ctx, "P99 Memory Usage", query, containerName)
 }
 
-func (g *Gateway) GetCPURequestMetrics(ctx context.Context, ns, name, timeRange string) (float64, error) {
-	query := fmt.Sprintf(`max(quantile_over_time(0.90, sum(rate(container_cpu_usage_seconds_total{namespace="%s", pod=~"^%s-.*", container!=""}[5m])) by (pod, namespace)[%s:1m]))`, ns, name, timeRange)
-	return g.executeQuery(ctx, "P90 CPU for Request", query)
+func (g *Gateway) GetCPURequestMetrics(ctx context.Context, ns, deploymentName, containerName, timeRange string) (float64, error) {
+	query := fmt.Sprintf(`max(quantile_over_time(0.90, rate(container_cpu_usage_seconds_total{namespace="%s", pod=~"^%s-.*", container="%s"}[5m])[%s:1m]))`, ns, deploymentName, containerName, timeRange)
+	return g.executeQuery(ctx, "P90 CPU for Request", query, containerName)
 }
 
-func (g *Gateway) GetCPULimitMetrics(ctx context.Context, ns, name, timeRange string) (float64, error) {
-	query := fmt.Sprintf(`max(quantile_over_time(0.99, sum(rate(container_cpu_usage_seconds_total{namespace="%s", pod=~"^%s-.*", container!=""}[5m])) by (pod, namespace)[%s:1m]))`, ns, name, timeRange)
-	return g.executeQuery(ctx, "P99 CPU for Limit", query)
+func (g *Gateway) GetCPULimitMetrics(ctx context.Context, ns, deploymentName, containerName, timeRange string) (float64, error) {
+	query := fmt.Sprintf(`max(quantile_over_time(0.99, rate(container_cpu_usage_seconds_total{namespace="%s", pod=~"^%s-.*", container="%s"}[5m])[%s:1m]))`, ns, deploymentName, containerName, timeRange)
+	return g.executeQuery(ctx, "P99 CPU for Limit", query, containerName)
 }
 
-func (g *Gateway) GetCPUMedianMetrics(ctx context.Context, ns, name, timeRange string) (float64, error) {
-	query := fmt.Sprintf(`max(quantile_over_time(0.5, sum(rate(container_cpu_usage_seconds_total{namespace="%s", pod=~"^%s-.*", container!=""}[5m])) by (pod, namespace)[%s:1m]))`, ns, name, timeRange)
-	return g.executeQuery(ctx, "P50 CPU for Spikiness", query)
+func (g *Gateway) GetCPUMedianMetrics(ctx context.Context, ns, deploymentName, containerName, timeRange string) (float64, error) {
+	query := fmt.Sprintf(`max(quantile_over_time(0.50, rate(container_cpu_usage_seconds_total{namespace="%s", pod=~"^%s-.*", container="%s"}[5m])[%s:1m]))`, ns, deploymentName, containerName, timeRange)
+	return g.executeQuery(ctx, "P50 CPU for Spikiness", query, containerName)
 }
 
-func (g *Gateway) executeQuery(ctx context.Context, queryName string, query string) (float64, error) {
-	g.logger.Info("Fetching metrics from Prometheus", "queryName", queryName)
+func (g *Gateway) executeQuery(ctx context.Context, queryName string, query string, containerName string) (float64, error) {
+	g.logger.Debug("Fetching metrics from Prometheus", "queryName", queryName, "container", containerName, "query", query)
 
 	result, warnings, err := g.api.Query(ctx, query, time.Now())
 	if err != nil {
-		return 0, fmt.Errorf("failed to query Prometheus for %s: %w", queryName, err)
+		return 0, fmt.Errorf("failed to query Prometheus for %s on container %s: %w", queryName, containerName, err)
 	}
 	if len(warnings) > 0 {
-		g.logger.Warn("Prometheus query returned warnings", "queryName", queryName, "warnings", warnings)
+		g.logger.Warn("Prometheus query returned warnings", "queryName", queryName, "container", containerName, "warnings", warnings)
 	}
 
 	vector, ok := result.(model.Vector)
 	if !ok {
-		return 0, fmt.Errorf("unexpected result type for %s: %s", queryName, result.Type().String())
+		return 0, fmt.Errorf("unexpected result type for %s query: %s", queryName, result.Type().String())
 	}
 
 	if vector.Len() == 0 {
-		g.logger.Info("Query returned no data", "queryName", queryName)
+		g.logger.Info("Query returned no data", "queryName", queryName, "container", containerName)
 		return 0, nil
 	}
 
 	value := float64(vector[0].Value)
 	if math.IsNaN(value) || math.IsInf(value, 0) {
+		g.logger.Warn("Query returned non-numeric value (NaN or Inf), treating as 0", "queryName", queryName, "container", containerName)
 		return 0, nil
 	}
 
