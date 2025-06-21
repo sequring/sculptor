@@ -24,13 +24,14 @@ func NewRecommenderUseCase(k8sGateway DeploymentGateway, promGateway MetricsGate
 }
 
 const (
-	spikinessThreshold    = 2.0
-	spikinessCPUBuffer    = 1.25
-	oomMemoryMultiplier   = 1.5
-	initMemoryBuffer      = 1.15
-	initMemoryDefault     = "128Mi"
-	initCPURequestDefault = "100m"
-	initCPULimitDefault   = "1000m"
+	spikinessThreshold               = 2.0
+	spikinessCPUBuffer               = 1.25
+	oomMemoryMultiplier              = 1.5
+	mainContainerMemoryBufferPercent = 120 // Represents 1.2x buffer
+	initContainerMemoryBufferPercent = 115 // Represents 1.15x buffer
+	initMemoryDefault                = "128Mi"
+	initCPURequestDefault            = "100m"
+	initCPULimitDefault              = "1000m"
 )
 
 type NamedRecommendation struct {
@@ -46,35 +47,36 @@ func (uc *RecommenderUseCase) CalculateForDeployment(ctx context.Context, namesp
 
 	var containersToAnalyze []string
 	if targetContainerName != "" {
-		containersToAnalyze = append(containersToAnalyze, targetContainerName)
-		uc.logger.Info("Analyzing specified container", "container", targetContainerName)
+		found := false
+		for _, c := range d.Spec.Template.Spec.Containers {
+			if c.Name == targetContainerName {
+				found = true
+				break
+			}
+		}
+		if found {
+			containersToAnalyze = append(containersToAnalyze, targetContainerName)
+		} else {
+			return []NamedRecommendation{}, nil
+		}
 	} else {
 		for _, c := range d.Spec.Template.Spec.Containers {
 			containersToAnalyze = append(containersToAnalyze, c.Name)
 		}
-		uc.logger.Info("No container specified, analyzing all main containers in the deployment", "containers", containersToAnalyze)
 	}
 
 	if len(containersToAnalyze) == 0 {
-		return nil, fmt.Errorf("no main containers found to analyze in deployment spec")
+		return []NamedRecommendation{}, nil
 	}
 
 	var finalRecommendations []NamedRecommendation
-
 	for _, containerName := range containersToAnalyze {
-		uc.logger.Info("Analyzing main container", "container", containerName)
-
-		isOOM, _, currentLimit, err := uc.k8sGateway.CheckForOOMKilledEvents(ctx, d, containerName)
-		if err != nil {
-			uc.logger.Warn("Could not check for OOM events", "container", containerName, "error", err)
-		}
+		isOOM, _, currentLimit, _ := uc.k8sGateway.CheckForOOMKilledEvents(ctx, d, containerName)
 
 		var memRecommendation *resource.Quantity
 		isOOMRecommendation := false
-
 		if isOOM {
 			isOOMRecommendation = true
-			uc.logger.Warn("OOMKilled event detected for container", "container", containerName)
 			if currentLimit != nil {
 				newVal := int64(float64(currentLimit.Value()) * oomMemoryMultiplier)
 				memRecommendation = resource.NewQuantity(newVal, resource.BinarySI)
@@ -82,42 +84,24 @@ func (uc *RecommenderUseCase) CalculateForDeployment(ctx context.Context, namesp
 				memRecommendation = resource.NewQuantity(1024*1024*512, resource.BinarySI)
 			}
 		} else {
-			memP99, err := uc.promGateway.GetMemoryMetrics(ctx, namespace, deploymentName, containerName, timeRange)
-			if err != nil {
-				return nil, err
-			}
-			memBytes := memP99 * 1.2
-			memRecommendation = resource.NewQuantity(int64(memBytes), resource.BinarySI)
+			memP99, _ := uc.promGateway.GetMemoryMetrics(ctx, namespace, deploymentName, containerName, timeRange)
+			// FIX: Use integer math to avoid float inaccuracies
+			memBytes := (int64(memP99) * mainContainerMemoryBufferPercent) / 100
+			memRecommendation = resource.NewQuantity(memBytes, resource.BinarySI)
 		}
 
-		cpuP90, err := uc.promGateway.GetCPURequestMetrics(ctx, namespace, deploymentName, containerName, timeRange)
-		if err != nil {
-			return nil, err
-		}
-		cpuP99, err := uc.promGateway.GetCPULimitMetrics(ctx, namespace, deploymentName, containerName, timeRange)
-		if err != nil {
-			return nil, err
-		}
-		cpuP50, err := uc.promGateway.GetCPUMedianMetrics(ctx, namespace, deploymentName, containerName, timeRange)
-		if err != nil {
-			return nil, err
-		}
+		cpuP90, _ := uc.promGateway.GetCPURequestMetrics(ctx, namespace, deploymentName, containerName, timeRange)
+		cpuP99, _ := uc.promGateway.GetCPULimitMetrics(ctx, namespace, deploymentName, containerName, timeRange)
+		cpuP50, _ := uc.promGateway.GetCPUMedianMetrics(ctx, namespace, deploymentName, containerName, timeRange)
 
 		cpuLimitValue := cpuP99
 		isSpiky := false
-
 		if cpuP50 > 0 && cpuP99/cpuP50 > spikinessThreshold {
 			isSpiky = true
 			cpuLimitValue *= spikinessCPUBuffer
-			uc.logger.Info("High CPU spikiness detected",
-				"container", containerName,
-				"p99_p50_ratio", fmt.Sprintf("%.2f", cpuP99/cpuP50),
-				"threshold", spikinessThreshold,
-			)
 		}
 
-		if cpuP90 == 0 && cpuP99 == 0 && memRecommendation.Value() == 0 {
-			uc.logger.Info("No usage data found for main container, skipping recommendation", "container", containerName)
+		if cpuP90 == 0 && cpuP99 == 0 && memRecommendation.IsZero() {
 			continue
 		}
 
@@ -130,13 +114,8 @@ func (uc *RecommenderUseCase) CalculateForDeployment(ctx context.Context, namesp
 				SpikinessWarning: isSpiky,
 			},
 		}
-
-		finalRecommendations = append(finalRecommendations, NamedRecommendation{
-			ContainerName:  containerName,
-			Recommendation: rec,
-		})
+		finalRecommendations = append(finalRecommendations, NamedRecommendation{ContainerName: containerName, Recommendation: rec})
 	}
-
 	return finalRecommendations, nil
 }
 
@@ -148,42 +127,43 @@ func (uc *RecommenderUseCase) CalculateForInitContainers(ctx context.Context, na
 
 	var containersToAnalyze []string
 	if targetContainerName != "" {
-		containersToAnalyze = append(containersToAnalyze, targetContainerName)
-		uc.logger.Info("Analyzing specified init container", "container", targetContainerName)
+		found := false
+		for _, c := range d.Spec.Template.Spec.InitContainers {
+			if c.Name == targetContainerName {
+				found = true
+				break
+			}
+		}
+		if found {
+			containersToAnalyze = append(containersToAnalyze, targetContainerName)
+		} else {
+			return []NamedRecommendation{}, nil
+		}
 	} else {
 		for _, c := range d.Spec.Template.Spec.InitContainers {
 			containersToAnalyze = append(containersToAnalyze, c.Name)
 		}
-		uc.logger.Info("No container specified, analyzing all init containers in the deployment", "containers", containersToAnalyze)
 	}
 
 	if len(containersToAnalyze) == 0 {
-		return nil, fmt.Errorf("no init containers found to analyze in deployment spec")
+		return []NamedRecommendation{}, nil
 	}
 
 	var finalRecommendations []NamedRecommendation
-
 	for _, containerName := range containersToAnalyze {
-		uc.logger.Info("Analyzing init container", "container", containerName)
-
 		var memRecommendation *resource.Quantity
-		memMax, err := uc.promGateway.GetInitContainerMemoryMetrics(ctx, namespace, deploymentName, containerName, timeRange)
-		if err != nil {
-			return nil, err
-		}
+		memMax, _ := uc.promGateway.GetInitContainerMemoryMetrics(ctx, namespace, deploymentName, containerName, timeRange)
 
 		if memMax > 0 {
-			memBytes := memMax * initMemoryBuffer
-			memRecommendation = resource.NewQuantity(int64(memBytes), resource.BinarySI)
+			// FIX: Use integer math to avoid float inaccuracies
+			memBytes := (int64(memMax) * initContainerMemoryBufferPercent) / 100
+			memRecommendation = resource.NewQuantity(memBytes, resource.BinarySI)
 		} else {
-			uc.logger.Info("No usage data for init container, applying safe defaults", "container", containerName)
 			memRecommendationVal := resource.MustParse(initMemoryDefault)
 			memRecommendation = &memRecommendationVal
 		}
-
 		cpuRequest := resource.MustParse(initCPURequestDefault)
 		cpuLimit := resource.MustParse(initCPULimitDefault)
-
 		rec := &entity.Recommendation{
 			Memory:      memRecommendation,
 			IsOOMKilled: false,
@@ -193,29 +173,20 @@ func (uc *RecommenderUseCase) CalculateForInitContainers(ctx context.Context, na
 				SpikinessWarning: false,
 			},
 		}
-
-		finalRecommendations = append(finalRecommendations, NamedRecommendation{
-			ContainerName:  containerName,
-			Recommendation: rec,
-		})
+		finalRecommendations = append(finalRecommendations, NamedRecommendation{ContainerName: containerName, Recommendation: rec})
 	}
-
 	return finalRecommendations, nil
 }
 
 func (uc *RecommenderUseCase) CalculateForAll(ctx context.Context, namespace, deploymentName, targetContainerName, timeRange string) (*AllRecommendations, error) {
-	uc.logger.Info("Analyzing all containers", "deployment", deploymentName, "namespace", namespace, "range", timeRange)
-
 	mainRecs, err := uc.CalculateForDeployment(ctx, namespace, deploymentName, targetContainerName, timeRange)
 	if err != nil {
 		return nil, fmt.Errorf("error calculating main container recommendations: %w", err)
 	}
-
 	initRecs, err := uc.CalculateForInitContainers(ctx, namespace, deploymentName, targetContainerName, timeRange)
 	if err != nil {
 		return nil, fmt.Errorf("error calculating init container recommendations: %w", err)
 	}
-
 	return &AllRecommendations{
 		MainContainers: mainRecs,
 		InitContainers: initRecs,
