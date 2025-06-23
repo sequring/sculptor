@@ -50,7 +50,7 @@ func NewClient(cfg *config.Data, logger *slog.Logger) (*Client, error) {
 	}
 
 	return &Client{
-		Clientset:  clientset, 
+		Clientset:  clientset,
 		RESTConfig: restConfig,
 		logger:     logger,
 	}, nil
