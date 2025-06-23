@@ -11,11 +11,9 @@ on:
 
 jobs:
   build-and-test:
-    # Запускать на последней версии Ubuntu
     runs-on: ubuntu-latest
 
     steps:
-      # Шаг 1: Клонирование вашего репозитория
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -37,5 +35,3 @@ jobs:
 
       - name: Run tests with coverage
         run: go test -v -race ./...
-
-

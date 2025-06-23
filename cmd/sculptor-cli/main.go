@@ -27,6 +27,7 @@ func main() {
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("Error loading config", "error", err)
+		slog.Info("You can create default config file by flag --generate-config")
 		os.Exit(1)
 	}
 
@@ -47,7 +48,7 @@ func main() {
 
 	showVersion, _ := pflag.CommandLine.GetBool("version")
 	if showVersion {
-		fmt.Printf("sculptor-cli version %s\n", version)
+		fmt.Printf("sculptor version %s\n", version)
 		fmt.Printf("commit: %s\n", commit)
 		fmt.Printf("built on: %s\n", date)
 		fmt.Printf("built by: %s\n", builtBy)
