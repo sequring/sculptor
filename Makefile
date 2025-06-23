@@ -48,6 +48,11 @@ clean:
 	rm -f ${BINARY_NAME}
 	rm -f coverage.out
 
+.PHONY: release
+release:
+	git tag v${VERSION}
+	git push origin v${VERSION}
+
 .PHONY: help
 help:
 	@echo "Available commands:"
@@ -58,4 +63,5 @@ help:
 	@echo "  fmt        - Format all Go source files"
 	@echo "  vet        - Run go vet to check for suspicious constructs"
 	@echo "  clean      - Clean up build artifacts"
+	@echo "  release    - Release a new version"
 	@echo "  help       - Show this help message"
