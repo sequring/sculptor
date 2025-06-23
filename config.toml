@@ -1,0 +1,15 @@
+# Default Kubernetes context to use. Can be overridden by --context flag.
+context = "dev"
+
+# Default path to kubeconfig file. Can be overridden by --kubeconfig flag.
+kubeconfig = ""
+
+# Analysis range for Prometheus queries (e.g., "7d", "24h", "1h").
+# Can be overridden by the --range flag.
+range = "2d"
+
+# Prometheus connection settings
+[prometheus]
+namespace = "monitoring"
+service = "kube-prometheus-stack-prometheus"
+port = 9090
