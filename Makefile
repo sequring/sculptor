@@ -50,8 +50,9 @@ clean:
 
 .PHONY: release
 release:
-	git tag v${VERSION}
-	git push origin v${VERSION}
+	TAG_VERSION=$(shell git describe --tags `git rev-list --tags --max-count=1` | awk -F. '{print $$1"."$$2"."$$3+1}')
+	git tag v${TAG_VERSION}
+	git push origin v${TAG_VERSION}
 
 .PHONY: help
 help:
