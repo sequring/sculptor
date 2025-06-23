@@ -35,6 +35,9 @@ func (m *mockDeploymentGateway) GetDeployment(ctx context.Context, namespace, na
 }
 
 func (m *mockDeploymentGateway) CheckForOOMKilledEvents(ctx context.Context, d *appsv1.Deployment, targetContainerName string) (bool, string, *resource.Quantity, error) {
+	if m.checkOOMErr != nil {
+		return false, "", nil, m.checkOOMErr
+	}
 	// Allow specific container targeting for OOM tests
 	if m.isOOMKilled && targetContainerName == m.oomPodName {
 		return true, m.oomPodName, m.oomCurrentLimit, m.checkOOMErr
@@ -108,14 +111,14 @@ func TestRecommenderUseCase_CalculateForAll(t *testing.T) {
 		wantErr      bool
 	}{
 		{
-			name:         "Happy Path: all containers with metrics",
+			name:         "Happy Path: all containers with metrics above floor",
 			target:       "all",
 			deploymentGW: &mockDeploymentGateway{deployment: baseDeployment},
 			metricsGW: &mockMetricsGateway{
 				memValue:     100 * 1024 * 1024,
 				cpuP90Value:  0.2,
 				cpuP99Value:  0.4,
-				cpuP50Value:  0.25, // P99/P50 = 1.6 < threshold, so no spikiness
+				cpuP50Value:  0.25,
 				initMemValue: 50 * 1024 * 1024,
 			},
 			want: &AllRecommendations{
@@ -123,7 +126,7 @@ func TestRecommenderUseCase_CalculateForAll(t *testing.T) {
 					ContainerName: "main-app",
 					Recommendation: &entity.Recommendation{
 						Memory: quantityFromInt((100 * 1024 * 1024 * mainContainerMemoryBufferPercent) / 100),
-						CPU:    &entity.CPURecommendation{Request: mustParseQuantity("200m"), Limit: mustParseQuantity("400m"), SpikinessWarning: false},
+						CPU:    &entity.CPURecommendation{Request: mustParseQuantity("200m"), Limit: mustParseQuantity("400m")},
 					},
 				}},
 				InitContainers: []NamedRecommendation{{
@@ -137,44 +140,38 @@ func TestRecommenderUseCase_CalculateForAll(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:   "OOMKilled Event: main container memory is multiplied",
-			target: "main",
-			deploymentGW: &mockDeploymentGateway{
-				deployment:      baseDeployment,
-				isOOMKilled:     true,
-				oomPodName:      "main-app", // Specify which container OOMed
-				oomCurrentLimit: mustParseQuantity("256Mi"),
-			},
-			metricsGW: &mockMetricsGateway{}, // Metrics for main should be ignored
+			name:         "OOMKilled Event: applies OOM multiplier and min floor for CPU",
+			target:       "main",
+			deploymentGW: &mockDeploymentGateway{deployment: baseDeployment, isOOMKilled: true, oomPodName: "main-app", oomCurrentLimit: mustParseQuantity("256Mi")},
+			metricsGW:    &mockMetricsGateway{},
 			want: &AllRecommendations{
 				MainContainers: []NamedRecommendation{{
 					ContainerName: "main-app",
 					Recommendation: &entity.Recommendation{
 						IsOOMKilled: true,
-						Memory:      mustParseQuantity(fmt.Sprintf("%dMi", int64(float64(256)*oomMemoryMultiplier))),
-						CPU:         &entity.CPURecommendation{Request: mustParseQuantity("0m"), Limit: mustParseQuantity("0m")},
+						Memory:      mustParseQuantity(fmt.Sprintf("%dMi", int(256*oomMemoryMultiplier))),
+						CPU:         &entity.CPURecommendation{Request: mustParseQuantity(fmt.Sprintf("%dm", minCPURequestMilli)), Limit: mustParseQuantity(fmt.Sprintf("%dm", minCPULimitMilli))},
 					},
 				}},
 			},
 			wantErr: false,
 		},
 		{
-			name:         "CPU Spikiness: CPU limit is buffered",
+			name:         "CPU Spikiness: CPU limit is buffered and memory is also buffered",
 			target:       "main",
 			deploymentGW: &mockDeploymentGateway{deployment: baseDeployment},
 			metricsGW: &mockMetricsGateway{
-				cpuP90Value: 0.1,
-				cpuP99Value: 0.5,
-				cpuP50Value: 0.1, // P99/P50 = 5 > threshold
+				memValue:    80 * 1024 * 1024, // 80Mi (> 64Mi floor)
+				cpuP90Value: 0.1, cpuP99Value: 0.5, cpuP50Value: 0.1,
 			},
 			want: &AllRecommendations{
 				MainContainers: []NamedRecommendation{{
 					ContainerName: "main-app",
 					Recommendation: &entity.Recommendation{
-						Memory: mustParseQuantity("0"),
+						Memory: quantityFromInt((80 * 1024 * 1024 * mainContainerMemoryBufferPercent) / 100),
 						CPU: &entity.CPURecommendation{
 							Request:          mustParseQuantity("100m"),
-							Limit:            mustParseQuantity(fmt.Sprintf("%dm", int(0.5*spikinessCPUBuffer*1000))), // 625m
+							Limit:            mustParseQuantity(fmt.Sprintf("%dm", int(0.5*spikinessCPUBuffer*1000))),
 							SpikinessWarning: true,
 						},
 					},
@@ -183,43 +180,54 @@ func TestRecommenderUseCase_CalculateForAll(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:         "No Metrics Data: main container is skipped",
+			name:         "Very Low Usage: applies min floor values",
 			target:       "main",
 			deploymentGW: &mockDeploymentGateway{deployment: baseDeployment},
-			metricsGW:    &mockMetricsGateway{}, // All values are 0
-			want:         &AllRecommendations{MainContainers: []NamedRecommendation{}},
-			wantErr:      false,
-		},
-		{
-			name:         "No Metrics Data: init container gets defaults",
-			target:       "init",
-			deploymentGW: &mockDeploymentGateway{deployment: baseDeployment},
-			metricsGW:    &mockMetricsGateway{initMemValue: 0},
+			metricsGW: &mockMetricsGateway{
+				memValue:    10 * 1024 * 1024,
+				cpuP90Value: 0.01,
+				cpuP99Value: 0.02,
+			},
 			want: &AllRecommendations{
-				InitContainers: []NamedRecommendation{{
-					ContainerName: "init-setup",
+				MainContainers: []NamedRecommendation{{
+					ContainerName: "main-app",
 					Recommendation: &entity.Recommendation{
-						Memory: mustParseQuantity(initMemoryDefault),
-						CPU:    &entity.CPURecommendation{Request: mustParseQuantity(initCPURequestDefault), Limit: mustParseQuantity(initCPULimitDefault)},
+						Memory: quantityFromInt(minMemoryBytes),
+						CPU: &entity.CPURecommendation{
+							Request: mustParseQuantity(fmt.Sprintf("%dm", minCPURequestMilli)),
+							Limit:   mustParseQuantity(fmt.Sprintf("%dm", minCPULimitMilli)),
+						},
 					},
 				}},
 			},
 			wantErr: false,
 		},
 		{
-			name:   "No Init Containers: InitRecs slice is empty",
-			target: "all",
-			deploymentGW: &mockDeploymentGateway{
-				deployment: &appsv1.Deployment{
-					Spec: appsv1.DeploymentSpec{Template: v1.PodTemplateSpec{Spec: v1.PodSpec{Containers: []v1.Container{{Name: "main-app"}}}}},
-				},
-			},
-			metricsGW: &mockMetricsGateway{memValue: 1}, // To generate a main rec
+			name:         "No Metrics Data: main container gets min floor values",
+			target:       "main",
+			deploymentGW: &mockDeploymentGateway{deployment: baseDeployment},
+			metricsGW:    &mockMetricsGateway{},
 			want: &AllRecommendations{
-				MainContainers: []NamedRecommendation{{ContainerName: "main-app"}}, // We only care about presence
-				InitContainers: []NamedRecommendation{},
+				MainContainers: []NamedRecommendation{{
+					ContainerName: "main-app",
+					Recommendation: &entity.Recommendation{
+						Memory: quantityFromInt(minMemoryBytes),
+						CPU: &entity.CPURecommendation{
+							Request: mustParseQuantity(fmt.Sprintf("%dm", minCPURequestMilli)),
+							Limit:   mustParseQuantity(fmt.Sprintf("%dm", minCPULimitMilli)),
+						},
+					},
+				}},
 			},
 			wantErr: false,
+		},
+		{
+			name:         "No Init Containers: InitRecs slice is empty",
+			target:       "all",
+			deploymentGW: &mockDeploymentGateway{deployment: &appsv1.Deployment{Spec: appsv1.DeploymentSpec{Template: v1.PodTemplateSpec{Spec: v1.PodSpec{Containers: []v1.Container{{Name: "main-app"}}}}}}},
+			metricsGW:    &mockMetricsGateway{memValue: minMemoryBytes, cpuP90Value: 0.1, cpuP99Value: 0.1},
+			want:         &AllRecommendations{MainContainers: []NamedRecommendation{{ContainerName: "main-app"}}, InitContainers: []NamedRecommendation{}},
+			wantErr:      false,
 		},
 		{
 			name:      "--container Flag Usage: only specified container is analyzed",
@@ -227,20 +235,13 @@ func TestRecommenderUseCase_CalculateForAll(t *testing.T) {
 			container: "main-app",
 			deploymentGW: &mockDeploymentGateway{
 				deployment: &appsv1.Deployment{
-					Spec: appsv1.DeploymentSpec{
-						Template: v1.PodTemplateSpec{
-							Spec: v1.PodSpec{
-								Containers:     []v1.Container{{Name: "main-app"}, {Name: "sidecar"}},
-								InitContainers: []v1.Container{{Name: "init-setup"}},
-							},
-						},
-					},
+					Spec: appsv1.DeploymentSpec{Template: v1.PodTemplateSpec{Spec: v1.PodSpec{Containers: []v1.Container{{Name: "main-app"}, {Name: "sidecar"}}, InitContainers: []v1.Container{{Name: "init-setup"}}}}},
 				},
 			},
-			metricsGW: &mockMetricsGateway{memValue: 1}, // Metrics only needed for main
+			metricsGW: &mockMetricsGateway{memValue: minMemoryBytes, cpuP90Value: 0.1, cpuP99Value: 0.1},
 			want: &AllRecommendations{
 				MainContainers: []NamedRecommendation{{ContainerName: "main-app"}},
-				InitContainers: []NamedRecommendation{}, // Init should be empty as it's not targeted
+				InitContainers: []NamedRecommendation{},
 			},
 			wantErr: false,
 		},
@@ -277,7 +278,6 @@ func TestRecommenderUseCase_CalculateForAll(t *testing.T) {
 				return
 			}
 
-			// Assertions for MainContainers
 			if len(got.MainContainers) != len(tt.want.MainContainers) {
 				t.Fatalf("got %d main recommendations, want %d", len(got.MainContainers), len(tt.want.MainContainers))
 			}
@@ -286,14 +286,11 @@ func TestRecommenderUseCase_CalculateForAll(t *testing.T) {
 				if gotRec.ContainerName != wantRec.ContainerName {
 					t.Errorf("MainRec[%d]: got container name %s, want %s", i, gotRec.ContainerName, wantRec.ContainerName)
 				}
-				// Skip deep comparison for presence-only checks
 				if wantRec.Recommendation == nil {
 					continue
 				}
 				assertRecommendation(t, fmt.Sprintf("MainRec[%d]", i), gotRec.Recommendation, wantRec.Recommendation)
 			}
-
-			// Assertions for InitContainers
 			if len(got.InitContainers) != len(tt.want.InitContainers) {
 				t.Fatalf("got %d init recommendations, want %d", len(got.InitContainers), len(tt.want.InitContainers))
 			}

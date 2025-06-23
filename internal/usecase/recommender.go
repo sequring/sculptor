@@ -32,6 +32,9 @@ const (
 	initMemoryDefault                = "128Mi"
 	initCPURequestDefault            = "100m"
 	initCPULimitDefault              = "1000m"
+	minCPURequestMilli               = 50
+	minCPULimitMilli                 = 100
+	minMemoryBytes                   = 64 * 1024 * 1024
 )
 
 type NamedRecommendation struct {
@@ -85,7 +88,6 @@ func (uc *RecommenderUseCase) CalculateForDeployment(ctx context.Context, namesp
 			}
 		} else {
 			memP99, _ := uc.promGateway.GetMemoryMetrics(ctx, namespace, deploymentName, containerName, timeRange)
-			// FIX: Use integer math to avoid float inaccuracies
 			memBytes := (int64(memP99) * mainContainerMemoryBufferPercent) / 100
 			memRecommendation = resource.NewQuantity(memBytes, resource.BinarySI)
 		}
@@ -101,16 +103,59 @@ func (uc *RecommenderUseCase) CalculateForDeployment(ctx context.Context, namesp
 			cpuLimitValue *= spikinessCPUBuffer
 		}
 
-		if cpuP90 == 0 && cpuP99 == 0 && memRecommendation.IsZero() {
-			continue
+		calculatedCPURequestMilli := int64(cpuP90 * 1000)
+		if calculatedCPURequestMilli < minCPURequestMilli {
+			uc.logger.Info(
+				"Calculated CPU request is below the minimum floor, applying minimum.",
+				"container", containerName,
+				"calculated", fmt.Sprintf("%dm", calculatedCPURequestMilli),
+				"minimum", fmt.Sprintf("%dm", minCPURequestMilli),
+			)
+			calculatedCPURequestMilli = minCPURequestMilli
 		}
+
+		calculatedCPULimitMilli := int64(cpuLimitValue * 1000)
+		if calculatedCPULimitMilli < minCPULimitMilli {
+			uc.logger.Info(
+				"Calculated CPU limit is below the minimum floor, applying minimum.",
+				"container", containerName,
+				"calculated", fmt.Sprintf("%dm", calculatedCPULimitMilli),
+				"minimum", fmt.Sprintf("%dm", minCPULimitMilli),
+			)
+			calculatedCPULimitMilli = minCPULimitMilli
+		}
+
+		if calculatedCPULimitMilli < calculatedCPURequestMilli {
+			uc.logger.Info(
+				"Calculated CPU limit is below the CPU request, applying CPU request as limit.",
+				"container", containerName,
+				"calculated", fmt.Sprintf("%dm", calculatedCPULimitMilli),
+				"request", fmt.Sprintf("%dm", calculatedCPURequestMilli),
+			)
+			calculatedCPULimitMilli = calculatedCPURequestMilli
+		}
+
+		calculatedMemoryBytes := memRecommendation.Value()
+		if calculatedMemoryBytes < minMemoryBytes {
+			uc.logger.Info(
+				"Calculated memory is below the minimum floor, applying minimum.",
+				"container", containerName,
+				"calculated", fmt.Sprintf("%dMi", calculatedMemoryBytes),
+				"minimum", fmt.Sprintf("%dMi", minMemoryBytes),
+			)
+			calculatedMemoryBytes = minMemoryBytes
+		}
+
+		memRecommendation = resource.NewQuantity(calculatedMemoryBytes, resource.BinarySI)
+		cpuRequest := resource.NewMilliQuantity(calculatedCPURequestMilli, resource.DecimalSI)
+		cpuLimit := resource.NewMilliQuantity(calculatedCPULimitMilli, resource.DecimalSI)
 
 		rec := &entity.Recommendation{
 			Memory:      memRecommendation,
 			IsOOMKilled: isOOMRecommendation,
 			CPU: &entity.CPURecommendation{
-				Request:          resource.NewMilliQuantity(int64(cpuP90*1000), resource.DecimalSI),
-				Limit:            resource.NewMilliQuantity(int64(cpuLimitValue*1000), resource.DecimalSI),
+				Request:          cpuRequest,
+				Limit:            cpuLimit,
 				SpikinessWarning: isSpiky,
 			},
 		}
