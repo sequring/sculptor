@@ -27,7 +27,6 @@ func main() {
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("Error loading config", "error", err)
-		slog.Info("You can create default config file by flag --generate-config")
 		os.Exit(1)
 	}
 
@@ -55,25 +54,25 @@ func main() {
 		os.Exit(0)
 	}
 
-	var prometheusURL string
+	k8sClient, err := k8s_gateway.NewClient(cfg, logger)
+	if err != nil {
+		logger.Error("Failed to create Kubernetes client", "error", err)
+		os.Exit(1)
+	}
 
+	var prometheusURL string
 	if cfg.Prometheus.URL != "" {
 		prometheusURL = cfg.Prometheus.URL
 		logger.Info("Connecting to Prometheus directly", "url", prometheusURL)
 	} else {
 		logger.Info("Prometheus URL not specified, starting automatic port-forward")
-		k8sClientForPF, err := k8s_gateway.NewClient(cfg, logger)
-		if err != nil {
-			logger.Error("Failed to create Kubernetes client for port-forward", "error", err)
-			os.Exit(1)
-		}
 		stopCh := make(chan struct{}, 1)
 		readyCh := make(chan struct{})
 		errCh := make(chan error, 1)
 		defer close(stopCh)
 
 		go func() {
-			err := k8sClientForPF.StartPortForward(logger, cfg.Prometheus.Namespace, cfg.Prometheus.Service, cfg.Prometheus.Port, stopCh, readyCh)
+			err := k8sClient.StartPortForward(logger, cfg.Prometheus.Namespace, cfg.Prometheus.Service, cfg.Prometheus.Port, stopCh, readyCh)
 			if err != nil {
 				errCh <- fmt.Errorf("port-forwarding failed: %w", err)
 			}
@@ -92,11 +91,6 @@ func main() {
 		prometheusURL = fmt.Sprintf("http://localhost:%d", cfg.Prometheus.Port)
 	}
 
-	k8sClient, err := k8s_gateway.NewClient(cfg, logger)
-	if err != nil {
-		logger.Error("Failed to create Kubernetes client", "error", err)
-		os.Exit(1)
-	}
 	promGateway, err := prom_gateway.NewGateway(prometheusURL, logger)
 	if err != nil {
 		logger.Error("Failed to create Prometheus gateway", "error", err)
@@ -107,44 +101,37 @@ func main() {
 	recommender := usecase.NewRecommenderUseCase(k8sGateway, promGateway, logger)
 	yamlPresenter := presenter.NewYAMLPresenter(cfg.Silent, os.Stdout)
 
+	var recommendations *usecase.AllRecommendations
+	var calcErr error
+
 	switch cfg.Target {
 	case "all":
 		logger.Info("Analyzing all containers", "deployment", cfg.Deployment, "namespace", cfg.Namespace, "range", cfg.Range)
-		recommendations, err := recommender.CalculateForAll(context.Background(), cfg.Namespace, cfg.Deployment, cfg.Container, cfg.Range)
-		if err != nil {
-			logger.Error("Error calculating recommendations", "error", err)
-			os.Exit(1)
-		}
-		err = yamlPresenter.RenderAll(recommendations)
-		if err != nil {
-			logger.Error("Error rendering recommendations", "error", err)
-			os.Exit(1)
-		}
-
+		recommendations, calcErr = recommender.CalculateForAll(context.Background(), cfg.Namespace, cfg.Deployment, cfg.Container, cfg.Range)
 	case "init":
 		logger.Info("Analyzing init containers", "deployment", cfg.Deployment, "namespace", cfg.Namespace, "range", cfg.Range)
-		recommendations, err := recommender.CalculateForInitContainers(context.Background(), cfg.Namespace, cfg.Deployment, cfg.Container, cfg.Range)
-		if err != nil {
-			logger.Error("Init container calculation error", "error", err)
-			os.Exit(1)
+		initRecs, err := recommender.CalculateForInitContainers(context.Background(), cfg.Namespace, cfg.Deployment, cfg.Container, cfg.Range)
+		if err == nil {
+			recommendations = &usecase.AllRecommendations{InitContainers: initRecs}
 		}
-		err = yamlPresenter.RenderInit(recommendations)
-		if err != nil {
-			logger.Error("Init container rendering error", "error", err)
-			os.Exit(1)
-		}
-
+		calcErr = err
 	default: // main
 		logger.Info("Analyzing main containers", "deployment", cfg.Deployment, "namespace", cfg.Namespace, "range", cfg.Range)
-		recommendations, err := recommender.CalculateForDeployment(context.Background(), cfg.Namespace, cfg.Deployment, cfg.Container, cfg.Range)
-		if err != nil {
-			logger.Error("Main container calculation error", "error", err)
-			os.Exit(1)
+		mainRecs, err := recommender.CalculateForDeployment(context.Background(), cfg.Namespace, cfg.Deployment, cfg.Container, cfg.Range)
+		if err == nil {
+			recommendations = &usecase.AllRecommendations{MainContainers: mainRecs}
 		}
-		err = yamlPresenter.Render(recommendations)
-		if err != nil {
-			logger.Error("Main container rendering error", "error", err)
-			os.Exit(1)
-		}
+		calcErr = err
+	}
+
+	if calcErr != nil {
+		logger.Error("Error calculating recommendations", "error", calcErr)
+		os.Exit(1)
+	}
+
+	err = yamlPresenter.Render(recommendations)
+	if err != nil {
+		logger.Error("Error rendering recommendations", "error", err)
+		os.Exit(1)
 	}
 }
