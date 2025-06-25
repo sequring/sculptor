@@ -50,9 +50,36 @@ clean:
 
 .PHONY: release
 release:
-	TAG_VERSION=$(shell git describe --tags `git rev-list --tags --max-count=1` | awk -F. '{print $$1"."$$2"."$$3+1}')
-	git tag v${TAG_VERSION}
-	git push origin v${TAG_VERSION}
+	@echo "Checking for latest tag..."
+	$(eval LATEST_TAG := $(shell git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0"))
+	$(eval VERSION := $(subst v,,$(LATEST_TAG)))
+	$(eval VERSION_PARTS := $(subst ., ,$(VERSION)))
+	$(eval MAJOR := $(word 1,$(VERSION_PARTS)))
+	$(eval MINOR := $(word 2,$(VERSION_PARTS)))
+	$(eval PATCH := $(word 3,$(VERSION_PARTS)))
+	$(eval NEXT_PATCH := $(shell echo $$(( $(PATCH) + 1 ))))
+	$(eval NEXT_TAG := v$(MAJOR).$(MINOR).$(NEXT_PATCH))
+	@echo "Current version: $(LATEST_TAG)"
+	@echo "Next version:    $(NEXT_TAG)"
+	@read -p "Is this correct? [y/N] " -n 1 -r; \
+	echo; \
+	if [ "$$REPLY" = "y" ] || [ "$$REPLY" = "Y" ]; then \
+		TAG=$(NEXT_TAG); \
+	else \
+		read -p "Enter version (e.g., v1.2.3): " TAG; \
+		if [ -z "$$TAG" ]; then \
+			echo "No version specified. Release cancelled."; \
+			exit 1; \
+		fi; \
+	fi; \
+	if [ -n "$$TAG" ]; then \
+		echo "Creating tag: $$TAG"; \
+		git tag -a $$TAG -m "Release $$TAG" && \
+		git push origin $$TAG; \
+	else \
+		echo "Release cancelled"; \
+		exit 1; \
+	fi
 
 .PHONY: help
 help:
