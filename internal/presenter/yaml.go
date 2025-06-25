@@ -12,14 +12,116 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-type OutputContainer struct {
-	Name      string                  `yaml:"name"`
-	Resources v1.ResourceRequirements `yaml:"resources"`
-}
-
 type OutputYAML struct {
 	Containers     []OutputContainer `yaml:"containers,omitempty"`
 	InitContainers []OutputContainer `yaml:"initContainers,omitempty"`
+}
+
+// MarshalYAML implements custom YAML marshaling for OutputYAML
+func (o OutputYAML) MarshalYAML() (interface{}, error) {
+	type Alias OutputYAML
+	return &struct {
+		Containers     []OutputContainer `yaml:"containers,omitempty"`
+		InitContainers []OutputContainer `yaml:"initContainers,omitempty"`
+	}{
+		Containers:     o.Containers,
+		InitContainers: o.InitContainers,
+	}, nil
+}
+
+type OutputContainer struct {
+	Name      string `yaml:"name"`
+	Resources ContainerResources `yaml:"resources"`
+}
+
+type ContainerResources struct {
+	Limits   map[string]resource.Quantity `yaml:"limits,omitempty"`
+	Requests map[string]resource.Quantity `yaml:"requests,omitempty"`
+}
+
+// MarshalYAML implements custom YAML marshaling for OutputContainer
+func (c OutputContainer) MarshalYAML() (interface{}, error) {
+	type Alias OutputContainer
+	return &struct {
+		Name      string `yaml:"name"`
+		Resources ContainerResources `yaml:"resources"`
+	}{
+		Name:      c.Name,
+		Resources: c.Resources,
+	}, nil
+}
+
+// NewOutputYAML creates a properly formatted YAML output structure
+func NewOutputYAML() *OutputYAML {
+	return &OutputYAML{
+		Containers:     []OutputContainer{},
+		InitContainers: []OutputContainer{},
+	}
+}
+
+// AddContainer adds a container to the output with properly formatted resources
+func (o *OutputYAML) AddContainer(name string, isInit bool, requests, limits v1.ResourceList) {
+	container := OutputContainer{
+		Name: name,
+		Resources: ContainerResources{
+			Requests: make(map[string]resource.Quantity),
+			Limits:   make(map[string]resource.Quantity),
+		},
+	}
+
+	// Convert resource lists to the format we want
+	for k, v := range requests {
+		container.Resources.Requests[string(k)] = v.DeepCopy()
+	}
+
+	for k, v := range limits {
+		container.Resources.Limits[string(k)] = v.DeepCopy()
+	}
+
+	if isInit {
+		o.InitContainers = append(o.InitContainers, container)
+	} else {
+		o.Containers = append(o.Containers, container)
+	}
+}
+
+// ToYAML converts the OutputYAML to a YAML string with proper formatting
+func (o *OutputYAML) ToYAML() ([]byte, error) {
+	output := make(map[string]interface{})
+
+	// Convert containers
+	if len(o.Containers) > 0 {
+		containers := make([]map[string]interface{}, 0, len(o.Containers))
+		for _, c := range o.Containers {
+			container := map[string]interface{}{
+				"name": c.Name,
+				"resources": map[string]interface{}{
+					"limits":   c.Resources.Limits,
+					"requests": c.Resources.Requests,
+				},
+			}
+			containers = append(containers, container)
+		}
+		output["containers"] = containers
+	}
+
+	// Convert init containers
+	if len(o.InitContainers) > 0 {
+		initContainers := make([]map[string]interface{}, 0, len(o.InitContainers))
+		for _, c := range o.InitContainers {
+			container := map[string]interface{}{
+				"name": c.Name,
+				"resources": map[string]interface{}{
+					"limits":   c.Resources.Limits,
+					"requests": c.Resources.Requests,
+				},
+			}
+			initContainers = append(initContainers, container)
+		}
+		output["initContainers"] = initContainers
+	}
+
+	return yaml.Marshal(output)
 }
 
 type YAMLPresenter struct {
@@ -42,41 +144,15 @@ func (p *YAMLPresenter) Render(recs *usecase.AllRecommendations) error {
 		return nil
 	}
 
-	mainContainers, mainWarnings, err := p.buildOutputContainers(recs.MainContainers)
-	if err != nil {
-		return err
-	}
-	initContainers, initWarnings, err := p.buildOutputContainers(recs.InitContainers)
-	if err != nil {
-		return err
-	}
-
-	allWarnings := append(mainWarnings, initWarnings...)
-	p.printWarnings(allWarnings)
-
-	outputData := make(map[string]interface{})
-
-	if len(mainContainers) > 0 {
-		outputData["containers"] = mainContainers
-	}
-	if len(initContainers) > 0 {
-		outputData["initContainers"] = initContainers
-	}
-
-	yamlBytes, err := yaml.Marshal(outputData)
-	if err != nil {
-		return fmt.Errorf("failed to marshal combined YAML: %w", err)
-	}
-
-	p.printYAML(yamlBytes)
-	return nil
-}
-
-func (p *YAMLPresenter) buildOutputContainers(recs []usecase.NamedRecommendation) ([]OutputContainer, []string, error) {
+	output := NewOutputYAML()
 	var allWarnings []string
-	var outputContainers []OutputContainer
 
-	for _, rec := range recs {
+	// Process main containers
+	for _, rec := range recs.MainContainers {
+		if rec.Recommendation == nil {
+			continue
+		}
+
 		if rec.Recommendation.IsOOMKilled {
 			allWarnings = append(allWarnings, fmt.Sprintf("OOMKilled event detected for container '%s'", rec.ContainerName))
 		}
@@ -87,27 +163,56 @@ func (p *YAMLPresenter) buildOutputContainers(recs []usecase.NamedRecommendation
 		memString := formatMemoryHumanReadable(rec.Recommendation.Memory)
 		prettyMem, err := resource.ParseQuantity(memString)
 		if err != nil {
-			return nil, nil, fmt.Errorf("parsing memory for %s: %w", rec.ContainerName, err)
-		}
-		prettyCPUReq, err := resource.ParseQuantity(rec.Recommendation.CPU.Request.String())
-		if err != nil {
-			return nil, nil, fmt.Errorf("parsing CPU request for %s: %w", rec.ContainerName, err)
-		}
-		prettyCPULim, err := resource.ParseQuantity(rec.Recommendation.CPU.Limit.String())
-		if err != nil {
-			return nil, nil, fmt.Errorf("parsing CPU limit for %s: %w", rec.ContainerName, err)
+			return fmt.Errorf("parsing memory for %s: %w", rec.ContainerName, err)
 		}
 
-		container := OutputContainer{
-			Name: rec.ContainerName,
-			Resources: v1.ResourceRequirements{
-				Requests: v1.ResourceList{v1.ResourceCPU: prettyCPUReq, v1.ResourceMemory: prettyMem},
-				Limits:   v1.ResourceList{v1.ResourceCPU: prettyCPULim, v1.ResourceMemory: prettyMem},
-			},
+		requests := v1.ResourceList{
+			v1.ResourceCPU:    *rec.Recommendation.CPU.Request,
+			v1.ResourceMemory: prettyMem,
 		}
-		outputContainers = append(outputContainers, container)
+
+		limits := v1.ResourceList{
+			v1.ResourceCPU:    *rec.Recommendation.CPU.Limit,
+			v1.ResourceMemory: prettyMem,
+		}
+
+		output.AddContainer(rec.ContainerName, false, requests, limits)
 	}
-	return outputContainers, allWarnings, nil
+
+	// Process init containers
+	for _, rec := range recs.InitContainers {
+		if rec.Recommendation == nil {
+			continue
+		}
+
+		memString := formatMemoryHumanReadable(rec.Recommendation.Memory)
+		prettyMem, err := resource.ParseQuantity(memString)
+		if err != nil {
+			return fmt.Errorf("parsing memory for init container %s: %w", rec.ContainerName, err)
+		}
+
+		requests := v1.ResourceList{
+			v1.ResourceCPU:    *rec.Recommendation.CPU.Request,
+			v1.ResourceMemory: prettyMem,
+		}
+
+		limits := v1.ResourceList{
+			v1.ResourceCPU:    *rec.Recommendation.CPU.Limit,
+			v1.ResourceMemory: prettyMem,
+		}
+
+		output.AddContainer(rec.ContainerName, true, requests, limits)
+	}
+
+	p.printWarnings(allWarnings)
+
+	yamlBytes, err := output.ToYAML()
+	if err != nil {
+		return fmt.Errorf("failed to marshal YAML: %w", err)
+	}
+
+	p.printYAML(yamlBytes)
+	return nil
 }
 
 func (p *YAMLPresenter) printWarnings(warnings []string) {
@@ -132,19 +237,22 @@ func (p *YAMLPresenter) printYAML(yamlBytes []byte) {
 
 func formatMemoryHumanReadable(q *resource.Quantity) string {
 	const (
-		Ki = 1024
-		Mi = 1024 * Ki
+		KiB = 1024
+		MiB = 1024 * KiB
 	)
+
 	if q == nil || q.IsZero() {
 		return "0"
 	}
-	bytes := q.Value()
+
+	val := float64(q.Value())
+
 	switch {
-	case bytes >= Mi:
-		return fmt.Sprintf("%.0fMi", math.Ceil(float64(bytes)/Mi))
-	case bytes >= Ki:
-		return fmt.Sprintf("%.0fKi", math.Ceil(float64(bytes)/Ki))
+	case val >= MiB:
+		return fmt.Sprintf("%.0fMi", math.Ceil(val/MiB))
+	case val >= KiB:
+		return fmt.Sprintf("%.0fKi", math.Ceil(val/KiB))
 	default:
-		return fmt.Sprintf("%dB", bytes)
+		return fmt.Sprintf("%dB", int64(val))
 	}
 }
