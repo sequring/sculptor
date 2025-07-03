@@ -129,6 +129,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if recommendations == nil || (len(recommendations.MainContainers) == 0 && len(recommendations.InitContainers) == 0) {
+		logger.Info("No recommendations were generated. This could be because the deployment or container was not found, or there was no data.")
+		os.Exit(0)
+	}
+
 	err = yamlPresenter.Render(recommendations)
 	if err != nil {
 		logger.Error("Error rendering recommendations", "error", err)

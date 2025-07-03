@@ -60,7 +60,7 @@ func (uc *RecommenderUseCase) CalculateForDeployment(ctx context.Context, namesp
 		if found {
 			containersToAnalyze = append(containersToAnalyze, targetContainerName)
 		} else {
-			return []NamedRecommendation{}, nil
+			return nil, fmt.Errorf("container '%s' not found in deployment '%s'", targetContainerName, deploymentName)
 		}
 	} else {
 		for _, c := range d.Spec.Template.Spec.Containers {
@@ -88,7 +88,17 @@ func (uc *RecommenderUseCase) CalculateForDeployment(ctx context.Context, namesp
 			}
 		} else {
 			memP99, _ := uc.promGateway.GetMemoryMetrics(ctx, namespace, deploymentName, containerName, timeRange)
-			memBytes := (int64(memP99) * mainContainerMemoryBufferPercent) / 100
+			memStdDev, _ := uc.promGateway.GetMemoryStdDevMetrics(ctx, namespace, deploymentName, containerName, timeRange)
+
+			// Dynamic memory buffer calculation
+			// Base buffer is 20%. If memory usage is volatile (std dev > 10% of p99), add extra buffer.
+			bufferPercent := 120.0 // Default 20% buffer
+			if memStdDev > 0 && memP99 > 0 && (memStdDev/memP99) > 0.1 {
+				bufferPercent = 130.0 // Increase to 30% buffer for volatile memory
+				uc.logger.Info("High memory volatility detected, using a larger buffer", "container", containerName)
+			}
+
+			memBytes := int64(memP99 * (bufferPercent / 100.0))
 			memRecommendation = resource.NewQuantity(memBytes, resource.BinarySI)
 		}
 
@@ -182,7 +192,7 @@ func (uc *RecommenderUseCase) CalculateForInitContainers(ctx context.Context, na
 		if found {
 			containersToAnalyze = append(containersToAnalyze, targetContainerName)
 		} else {
-			return []NamedRecommendation{}, nil
+			return nil, fmt.Errorf("container '%s' not found in deployment '%s'", targetContainerName, deploymentName)
 		}
 	} else {
 		for _, c := range d.Spec.Template.Spec.InitContainers {
