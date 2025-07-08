@@ -28,7 +28,7 @@ type Client struct {
 }
 
 type Gateway struct {
-	clientset *kubernetes.Clientset
+	clientset kubernetes.Interface
 	logger    *slog.Logger
 }
 
@@ -56,7 +56,7 @@ func NewClient(cfg *config.Data, logger *slog.Logger) (*Client, error) {
 	}, nil
 }
 
-func NewGateway(clientset *kubernetes.Clientset, logger *slog.Logger) *Gateway {
+func NewGateway(clientset kubernetes.Interface, logger *slog.Logger) *Gateway {
 	return &Gateway{
 		clientset: clientset,
 		logger:    logger,
