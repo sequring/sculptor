@@ -42,23 +42,23 @@ type NamedRecommendation struct {
 	Recommendation *entity.Recommendation
 }
 
-func (uc *RecommenderUseCase) CalculateForDeployment(ctx context.Context, namespace, deploymentName, targetContainerName, timeRange string) ([]NamedRecommendation, error) {
-	d, err := uc.k8sGateway.GetDeployment(ctx, namespace, deploymentName)
+func (uc *RecommenderUseCase) CalculateForDeployment(ctx context.Context, params DeploymentParams) ([]NamedRecommendation, error) {
+	d, err := uc.k8sGateway.GetDeployment(ctx, params.Namespace, params.DeploymentName)
 	if err != nil {
-		return nil, fmt.Errorf("could not get deployment: %w", err)
+		return nil, fmt.Errorf("could not get deployment %w", err)
 	}
 
 	var containersToAnalyze []string
-	if targetContainerName != "" {
+	if len(params.TargetContainer) > 0 {
 		found := false
 		for _, c := range d.Spec.Template.Spec.Containers {
-			if c.Name == targetContainerName {
+			if c.Name == params.TargetContainer {
 				found = true
 				break
 			}
 		}
 		if found {
-			containersToAnalyze = append(containersToAnalyze, targetContainerName)
+			containersToAnalyze = append(containersToAnalyze, params.TargetContainer)
 		} else {
 			return []NamedRecommendation{}, nil
 		}
@@ -87,18 +87,18 @@ func (uc *RecommenderUseCase) CalculateForDeployment(ctx context.Context, namesp
 				memRecommendation = resource.NewQuantity(1024*1024*512, resource.BinarySI)
 			}
 		} else {
-			memP99, _ := uc.promGateway.GetMemoryMetrics(ctx, namespace, deploymentName, containerName, timeRange)
+			memP99, _ := uc.promGateway.GetMemoryMetrics(ctx, params.Namespace, params.DeploymentName, containerName, params.TimeRange)
 			memBytes := (int64(memP99) * mainContainerMemoryBufferPercent) / 100
 			memRecommendation = resource.NewQuantity(memBytes, resource.BinarySI)
 		}
 
-		cpuP90, _ := uc.promGateway.GetCPURequestMetrics(ctx, namespace, deploymentName, containerName, timeRange)
-		cpuP99, _ := uc.promGateway.GetCPULimitMetrics(ctx, namespace, deploymentName, containerName, timeRange)
-		cpuP50, _ := uc.promGateway.GetCPUMedianMetrics(ctx, namespace, deploymentName, containerName, timeRange)
+		cpuP90, _ := uc.promGateway.GetCPURequestMetrics(ctx, params.Namespace, params.DeploymentName, containerName, params.TimeRange)
+		cpuP99, _ := uc.promGateway.GetCPULimitMetrics(ctx, params.Namespace, params.DeploymentName, containerName, params.TimeRange)
+		cpuP50, _ := uc.promGateway.GetCPUMedianMetrics(ctx, params.Namespace, params.DeploymentName, containerName, params.TimeRange)
 
 		cpuLimitValue := cpuP99
 		isSpiky := false
-		if cpuP50 > 0 && cpuP99/cpuP50 > spikinessThreshold {
+		if cpuP50 > 0 && (cpuP99/cpuP50 > spikinessThreshold) {
 			isSpiky = true
 			cpuLimitValue *= spikinessCPUBuffer
 		}
@@ -164,23 +164,23 @@ func (uc *RecommenderUseCase) CalculateForDeployment(ctx context.Context, namesp
 	return finalRecommendations, nil
 }
 
-func (uc *RecommenderUseCase) CalculateForInitContainers(ctx context.Context, namespace, deploymentName, targetContainerName, timeRange string) ([]NamedRecommendation, error) {
-	d, err := uc.k8sGateway.GetDeployment(ctx, namespace, deploymentName)
+func (uc *RecommenderUseCase) CalculateForInitContainers(ctx context.Context, params DeploymentParams) ([]NamedRecommendation, error) {
+	d, err := uc.k8sGateway.GetDeployment(ctx, params.Namespace, params.DeploymentName)
 	if err != nil {
 		return nil, fmt.Errorf("could not get deployment: %w", err)
 	}
 
 	var containersToAnalyze []string
-	if targetContainerName != "" {
+	if params.TargetContainer != "" {
 		found := false
 		for _, c := range d.Spec.Template.Spec.InitContainers {
-			if c.Name == targetContainerName {
+			if c.Name == params.TargetContainer {
 				found = true
 				break
 			}
 		}
 		if found {
-			containersToAnalyze = append(containersToAnalyze, targetContainerName)
+			containersToAnalyze = append(containersToAnalyze, params.TargetContainer)
 		} else {
 			return []NamedRecommendation{}, nil
 		}
@@ -197,7 +197,7 @@ func (uc *RecommenderUseCase) CalculateForInitContainers(ctx context.Context, na
 	var finalRecommendations []NamedRecommendation
 	for _, containerName := range containersToAnalyze {
 		var memRecommendation *resource.Quantity
-		memMax, _ := uc.promGateway.GetInitContainerMemoryMetrics(ctx, namespace, deploymentName, containerName, timeRange)
+		memMax, _ := uc.promGateway.GetInitContainerMemoryMetrics(ctx, params.Namespace, params.DeploymentName, containerName, params.TimeRange)
 
 		if memMax > 0 {
 			// FIX: Use integer math to avoid float inaccuracies
@@ -224,11 +224,17 @@ func (uc *RecommenderUseCase) CalculateForInitContainers(ctx context.Context, na
 }
 
 func (uc *RecommenderUseCase) CalculateForAll(ctx context.Context, namespace, deploymentName, targetContainerName, timeRange string) (*AllRecommendations, error) {
-	mainRecs, err := uc.CalculateForDeployment(ctx, namespace, deploymentName, targetContainerName, timeRange)
+	params := DeploymentParams{
+		Namespace:       namespace,
+		DeploymentName:  deploymentName,
+		TargetContainer: targetContainerName,
+		TimeRange:       timeRange,
+	}
+	mainRecs, err := uc.CalculateForDeployment(ctx, params)
 	if err != nil {
 		return nil, fmt.Errorf("error calculating main container recommendations: %w", err)
 	}
-	initRecs, err := uc.CalculateForInitContainers(ctx, namespace, deploymentName, targetContainerName, timeRange)
+	initRecs, err := uc.CalculateForInitContainers(ctx, params)
 	if err != nil {
 		return nil, fmt.Errorf("error calculating init container recommendations: %w", err)
 	}

@@ -86,228 +86,6 @@ func quantityFromInt(val int64) *resource.Quantity {
 	return resource.NewQuantity(val, resource.BinarySI)
 }
 
-// --- Test Suite ---
-
-func TestRecommenderUseCase_CalculateForAll(t *testing.T) {
-	baseDeployment := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-deployment", Namespace: "test-ns"},
-		Spec: appsv1.DeploymentSpec{
-			Template: v1.PodTemplateSpec{
-				Spec: v1.PodSpec{
-					Containers:     []v1.Container{{Name: "main-app"}},
-					InitContainers: []v1.Container{{Name: "init-setup"}},
-				},
-			},
-		},
-	}
-
-	tests := []struct {
-		name         string
-		deploymentGW DeploymentGateway
-		metricsGW    MetricsGateway
-		target       string
-		container    string
-		want         *AllRecommendations
-		wantErr      bool
-	}{
-		{
-			name:         "Happy Path: all containers with metrics above floor",
-			target:       "all",
-			deploymentGW: &mockDeploymentGateway{deployment: baseDeployment},
-			metricsGW: &mockMetricsGateway{
-				memValue:     100 * 1024 * 1024,
-				cpuP90Value:  0.2,
-				cpuP99Value:  0.4,
-				cpuP50Value:  0.25,
-				initMemValue: 50 * 1024 * 1024,
-			},
-			want: &AllRecommendations{
-				MainContainers: []NamedRecommendation{{
-					ContainerName: "main-app",
-					Recommendation: &entity.Recommendation{
-						Memory: quantityFromInt((100 * 1024 * 1024 * mainContainerMemoryBufferPercent) / 100),
-						CPU:    &entity.CPURecommendation{Request: mustParseQuantity("200m"), Limit: mustParseQuantity("400m")},
-					},
-				}},
-				InitContainers: []NamedRecommendation{{
-					ContainerName: "init-setup",
-					Recommendation: &entity.Recommendation{
-						Memory: quantityFromInt((50 * 1024 * 1024 * initContainerMemoryBufferPercent) / 100),
-						CPU:    &entity.CPURecommendation{Request: mustParseQuantity(initCPURequestDefault), Limit: mustParseQuantity(initCPULimitDefault)},
-					},
-				}},
-			},
-			wantErr: false,
-		},
-		{
-			name:         "OOMKilled Event: applies OOM multiplier and min floor for CPU",
-			target:       "main",
-			deploymentGW: &mockDeploymentGateway{deployment: baseDeployment, isOOMKilled: true, oomPodName: "main-app", oomCurrentLimit: mustParseQuantity("256Mi")},
-			metricsGW:    &mockMetricsGateway{},
-			want: &AllRecommendations{
-				MainContainers: []NamedRecommendation{{
-					ContainerName: "main-app",
-					Recommendation: &entity.Recommendation{
-						IsOOMKilled: true,
-						Memory:      mustParseQuantity(fmt.Sprintf("%dMi", int(256*oomMemoryMultiplier))),
-						CPU:         &entity.CPURecommendation{Request: mustParseQuantity(fmt.Sprintf("%dm", minCPURequestMilli)), Limit: mustParseQuantity(fmt.Sprintf("%dm", minCPULimitMilli))},
-					},
-				}},
-			},
-			wantErr: false,
-		},
-		{
-			name:         "CPU Spikiness: CPU limit is buffered and memory is also buffered",
-			target:       "main",
-			deploymentGW: &mockDeploymentGateway{deployment: baseDeployment},
-			metricsGW: &mockMetricsGateway{
-				memValue:    80 * 1024 * 1024, // 80Mi (> 64Mi floor)
-				cpuP90Value: 0.1, cpuP99Value: 0.5, cpuP50Value: 0.1,
-			},
-			want: &AllRecommendations{
-				MainContainers: []NamedRecommendation{{
-					ContainerName: "main-app",
-					Recommendation: &entity.Recommendation{
-						Memory: quantityFromInt((80 * 1024 * 1024 * mainContainerMemoryBufferPercent) / 100),
-						CPU: &entity.CPURecommendation{
-							Request:          mustParseQuantity("100m"),
-							Limit:            mustParseQuantity(fmt.Sprintf("%dm", int(0.5*spikinessCPUBuffer*1000))),
-							SpikinessWarning: true,
-						},
-					},
-				}},
-			},
-			wantErr: false,
-		},
-		{
-			name:         "Very Low Usage: applies min floor values",
-			target:       "main",
-			deploymentGW: &mockDeploymentGateway{deployment: baseDeployment},
-			metricsGW: &mockMetricsGateway{
-				memValue:    10 * 1024 * 1024,
-				cpuP90Value: 0.01,
-				cpuP99Value: 0.02,
-			},
-			want: &AllRecommendations{
-				MainContainers: []NamedRecommendation{{
-					ContainerName: "main-app",
-					Recommendation: &entity.Recommendation{
-						Memory: quantityFromInt(minMemoryBytes),
-						CPU: &entity.CPURecommendation{
-							Request: mustParseQuantity(fmt.Sprintf("%dm", minCPURequestMilli)),
-							Limit:   mustParseQuantity(fmt.Sprintf("%dm", minCPULimitMilli)),
-						},
-					},
-				}},
-			},
-			wantErr: false,
-		},
-		{
-			name:         "No Metrics Data: main container gets min floor values",
-			target:       "main",
-			deploymentGW: &mockDeploymentGateway{deployment: baseDeployment},
-			metricsGW:    &mockMetricsGateway{},
-			want: &AllRecommendations{
-				MainContainers: []NamedRecommendation{{
-					ContainerName: "main-app",
-					Recommendation: &entity.Recommendation{
-						Memory: quantityFromInt(minMemoryBytes),
-						CPU: &entity.CPURecommendation{
-							Request: mustParseQuantity(fmt.Sprintf("%dm", minCPURequestMilli)),
-							Limit:   mustParseQuantity(fmt.Sprintf("%dm", minCPULimitMilli)),
-						},
-					},
-				}},
-			},
-			wantErr: false,
-		},
-		{
-			name:         "No Init Containers: InitRecs slice is empty",
-			target:       "all",
-			deploymentGW: &mockDeploymentGateway{deployment: &appsv1.Deployment{Spec: appsv1.DeploymentSpec{Template: v1.PodTemplateSpec{Spec: v1.PodSpec{Containers: []v1.Container{{Name: "main-app"}}}}}}},
-			metricsGW:    &mockMetricsGateway{memValue: minMemoryBytes, cpuP90Value: 0.1, cpuP99Value: 0.1},
-			want:         &AllRecommendations{MainContainers: []NamedRecommendation{{ContainerName: "main-app"}}, InitContainers: []NamedRecommendation{}},
-			wantErr:      false,
-		},
-		{
-			name:      "--container Flag Usage: only specified container is analyzed",
-			target:    "all",
-			container: "main-app",
-			deploymentGW: &mockDeploymentGateway{
-				deployment: &appsv1.Deployment{
-					Spec: appsv1.DeploymentSpec{Template: v1.PodTemplateSpec{Spec: v1.PodSpec{Containers: []v1.Container{{Name: "main-app"}, {Name: "sidecar"}}, InitContainers: []v1.Container{{Name: "init-setup"}}}}},
-				},
-			},
-			metricsGW: &mockMetricsGateway{memValue: minMemoryBytes, cpuP90Value: 0.1, cpuP99Value: 0.1},
-			want: &AllRecommendations{
-				MainContainers: []NamedRecommendation{{ContainerName: "main-app"}},
-				InitContainers: []NamedRecommendation{},
-			},
-			wantErr: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			uc := NewRecommenderUseCase(tt.deploymentGW, tt.metricsGW, newTestLogger())
-			var got *AllRecommendations
-			var err error
-
-			switch tt.target {
-			case "main":
-				mainRecs, mainErr := uc.CalculateForDeployment(context.Background(), "test-ns", "test-deployment", tt.container, "7d")
-				if mainErr == nil {
-					got = &AllRecommendations{MainContainers: mainRecs}
-				}
-				err = mainErr
-			case "init":
-				initRecs, initErr := uc.CalculateForInitContainers(context.Background(), "test-ns", "test-deployment", tt.container, "7d")
-				if initErr == nil {
-					got = &AllRecommendations{InitContainers: initRecs}
-				}
-				err = initErr
-			default:
-				got, err = uc.CalculateForAll(context.Background(), "test-ns", "test-deployment", tt.container, "7d")
-			}
-
-			if (err != nil) != tt.wantErr {
-				t.Errorf("RecommenderUseCase.Calculate() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if err != nil {
-				return
-			}
-
-			if len(got.MainContainers) != len(tt.want.MainContainers) {
-				t.Fatalf("got %d main recommendations, want %d", len(got.MainContainers), len(tt.want.MainContainers))
-			}
-			for i, gotRec := range got.MainContainers {
-				wantRec := tt.want.MainContainers[i]
-				if gotRec.ContainerName != wantRec.ContainerName {
-					t.Errorf("MainRec[%d]: got container name %s, want %s", i, gotRec.ContainerName, wantRec.ContainerName)
-				}
-				if wantRec.Recommendation == nil {
-					continue
-				}
-				assertRecommendation(t, fmt.Sprintf("MainRec[%d]", i), gotRec.Recommendation, wantRec.Recommendation)
-			}
-			if len(got.InitContainers) != len(tt.want.InitContainers) {
-				t.Fatalf("got %d init recommendations, want %d", len(got.InitContainers), len(tt.want.InitContainers))
-			}
-			for i, gotRec := range got.InitContainers {
-				wantRec := tt.want.InitContainers[i]
-				if gotRec.ContainerName != wantRec.ContainerName {
-					t.Errorf("InitRec[%d]: got container name %s, want %s", i, gotRec.ContainerName, wantRec.ContainerName)
-				}
-				if wantRec.Recommendation == nil {
-					continue
-				}
-				assertRecommendation(t, fmt.Sprintf("InitRec[%d]", i), gotRec.Recommendation, wantRec.Recommendation)
-			}
-		})
-	}
-}
-
 func assertRecommendation(t *testing.T, prefix string, got, want *entity.Recommendation) {
 	if got.IsOOMKilled != want.IsOOMKilled {
 		t.Errorf("%s: got IsOOMKilled %v, want %v", prefix, got.IsOOMKilled, want.IsOOMKilled)
@@ -324,4 +102,461 @@ func assertRecommendation(t *testing.T, prefix string, got, want *entity.Recomme
 	if got.CPU.Limit.Cmp(*want.CPU.Limit) != 0 {
 		t.Errorf("%s: got CPU Limit %s, want %s", prefix, got.CPU.Limit.String(), want.CPU.Limit.String())
 	}
+}
+
+// --- Test Suite ---
+
+func TestRecommenderUseCase_CalculateForDeployment_HappyPath(t *testing.T) {
+	// Arrange
+	baseDeployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-deployment", Namespace: "test-ns"},
+		Spec: appsv1.DeploymentSpec{
+			Template: v1.PodTemplateSpec{
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{{Name: "main-app"}},
+				},
+			},
+		},
+	}
+
+	deploymentGW := &mockDeploymentGateway{deployment: baseDeployment}
+	metricsGW := &mockMetricsGateway{
+		memValue:    100 * 1024 * 1024,
+		cpuP90Value: 0.2,
+		cpuP99Value: 0.4,
+		cpuP50Value: 0.25,
+	}
+	uc := NewRecommenderUseCase(deploymentGW, metricsGW, newTestLogger())
+
+	params := DeploymentParams{
+		Namespace:      "test-ns",
+		DeploymentName: "test-deployment",
+		TimeRange:      "7d",
+	}
+
+	// Act
+	recommendations, err := uc.CalculateForDeployment(context.Background(), params)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(recommendations) != 1 {
+		t.Fatalf("expected 1 recommendation, got %d", len(recommendations))
+	}
+
+	rec := recommendations[0]
+	if rec.ContainerName != "main-app" {
+		t.Errorf("expected container name 'main-app', got '%s'", rec.ContainerName)
+	}
+
+	wantMemory := quantityFromInt((100 * 1024 * 1024 * mainContainerMemoryBufferPercent) / 100)
+	if rec.Recommendation.Memory.Cmp(*wantMemory) != 0 {
+		t.Errorf("Memory: got %s, want %s", rec.Recommendation.Memory.String(), wantMemory.String())
+	}
+
+	wantCPURequest := mustParseQuantity("200m")
+	if rec.Recommendation.CPU.Request.Cmp(*wantCPURequest) != 0 {
+		t.Errorf("CPU Request: got %s, want %s", rec.Recommendation.CPU.Request.String(), wantCPURequest.String())
+	}
+
+	wantCPULimit := mustParseQuantity("400m")
+	if rec.Recommendation.CPU.Limit.Cmp(*wantCPULimit) != 0 {
+		t.Errorf("CPU Limit: got %s, want %s", rec.Recommendation.CPU.Limit.String(), wantCPULimit.String())
+	}
+}
+
+func TestRecommenderUseCase_CalculateForDeployment_OOMKilled(t *testing.T) {
+	// Arrange
+	baseDeployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-deployment", Namespace: "test-ns"},
+		Spec: appsv1.DeploymentSpec{
+			Template: v1.PodTemplateSpec{
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{{Name: "main-app"}},
+				},
+			},
+		},
+	}
+
+	deploymentGW := &mockDeploymentGateway{
+		deployment:      baseDeployment,
+		isOOMKilled:     true,
+		oomPodName:      "main-app",
+		oomCurrentLimit: mustParseQuantity("256Mi"),
+	}
+	metricsGW := &mockMetricsGateway{}
+	uc := NewRecommenderUseCase(deploymentGW, metricsGW, newTestLogger())
+
+	params := DeploymentParams{
+		Namespace:      "test-ns",
+		DeploymentName: "test-deployment",
+		TimeRange:      "7d",
+	}
+
+	// Act
+	recommendations, err := uc.CalculateForDeployment(context.Background(), params)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(recommendations) != 1 {
+		t.Fatalf("expected 1 recommendation, got %d", len(recommendations))
+	}
+
+	rec := recommendations[0]
+	if !rec.Recommendation.IsOOMKilled {
+		t.Error("expected IsOOMKilled to be true")
+	}
+
+	wantMemory := mustParseQuantity(fmt.Sprintf("%dMi", int(256*oomMemoryMultiplier)))
+	if rec.Recommendation.Memory.Cmp(*wantMemory) != 0 {
+		t.Errorf("Memory: got %s, want %s", rec.Recommendation.Memory.String(), wantMemory.String())
+	}
+}
+
+func TestRecommenderUseCase_CalculateForDeployment_CPUSpikiness(t *testing.T) {
+	// Arrange
+	baseDeployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-deployment", Namespace: "test-ns"},
+		Spec: appsv1.DeploymentSpec{
+			Template: v1.PodTemplateSpec{
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{{Name: "main-app"}},
+				},
+			},
+		},
+	}
+
+	deploymentGW := &mockDeploymentGateway{deployment: baseDeployment}
+	metricsGW := &mockMetricsGateway{
+		memValue:    80 * 1024 * 1024, // 80Mi (> 64Mi floor)
+		cpuP90Value: 0.1,
+		cpuP99Value: 0.5,
+		cpuP50Value: 0.1,
+	}
+	uc := NewRecommenderUseCase(deploymentGW, metricsGW, newTestLogger())
+
+	params := DeploymentParams{
+		Namespace:      "test-ns",
+		DeploymentName: "test-deployment",
+		TimeRange:      "7d",
+	}
+
+	// Act
+	recommendations, err := uc.CalculateForDeployment(context.Background(), params)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(recommendations) != 1 {
+		t.Fatalf("expected 1 recommendation, got %d", len(recommendations))
+	}
+
+	rec := recommendations[0]
+	if !rec.Recommendation.CPU.SpikinessWarning {
+		t.Error("expected SpikinessWarning to be true")
+	}
+
+	wantLimit := mustParseQuantity(fmt.Sprintf("%dm", int(0.5*spikinessCPUBuffer*1000)))
+	if rec.Recommendation.CPU.Limit.Cmp(*wantLimit) != 0 {
+		t.Errorf("CPU Limit: got %s, want %s", rec.Recommendation.CPU.Limit.String(), wantLimit.String())
+	}
+}
+
+func TestRecommenderUseCase_CalculateForDeployment_VeryLowUsage(t *testing.T) {
+	// Arrange
+	baseDeployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-deployment", Namespace: "test-ns"},
+		Spec: appsv1.DeploymentSpec{
+			Template: v1.PodTemplateSpec{
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{{Name: "main-app"}},
+				},
+			},
+		},
+	}
+
+	deploymentGW := &mockDeploymentGateway{deployment: baseDeployment}
+	metricsGW := &mockMetricsGateway{
+		memValue:    10 * 1024 * 1024,
+		cpuP90Value: 0.01,
+		cpuP99Value: 0.02,
+	}
+	uc := NewRecommenderUseCase(deploymentGW, metricsGW, newTestLogger())
+
+	params := DeploymentParams{
+		Namespace:      "test-ns",
+		DeploymentName: "test-deployment",
+		TimeRange:      "7d",
+	}
+
+	// Act
+	recommendations, err := uc.CalculateForDeployment(context.Background(), params)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(recommendations) != 1 {
+		t.Fatalf("expected 1 recommendation, got %d", len(recommendations))
+	}
+
+	rec := recommendations[0]
+	wantMemory := quantityFromInt(minMemoryBytes)
+	if rec.Recommendation.Memory.Cmp(*wantMemory) != 0 {
+		t.Errorf("Memory: got %s, want %s", rec.Recommendation.Memory.String(), wantMemory.String())
+	}
+
+	wantCPURequest := mustParseQuantity(fmt.Sprintf("%dm", minCPURequestMilli))
+	if rec.Recommendation.CPU.Request.Cmp(*wantCPURequest) != 0 {
+		t.Errorf("CPU Request: got %s, want %s", rec.Recommendation.CPU.Request.String(), wantCPURequest.String())
+	}
+
+	wantCPULimit := mustParseQuantity(fmt.Sprintf("%dm", minCPULimitMilli))
+	if rec.Recommendation.CPU.Limit.Cmp(*wantCPULimit) != 0 {
+		t.Errorf("CPU Limit: got %s, want %s", rec.Recommendation.CPU.Limit.String(), wantCPULimit.String())
+	}
+}
+
+func TestRecommenderUseCase_CalculateForDeployment_NoMetricsData(t *testing.T) {
+	// Arrange
+	baseDeployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-deployment", Namespace: "test-ns"},
+		Spec: appsv1.DeploymentSpec{
+			Template: v1.PodTemplateSpec{
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{{Name: "main-app"}},
+				},
+			},
+		},
+	}
+
+	deploymentGW := &mockDeploymentGateway{deployment: baseDeployment}
+	metricsGW := &mockMetricsGateway{}
+	uc := NewRecommenderUseCase(deploymentGW, metricsGW, newTestLogger())
+
+	params := DeploymentParams{
+		Namespace:      "test-ns",
+		DeploymentName: "test-deployment",
+		TimeRange:      "7d",
+	}
+
+	// Act
+	recommendations, err := uc.CalculateForDeployment(context.Background(), params)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(recommendations) != 1 {
+		t.Fatalf("expected 1 recommendation, got %d", len(recommendations))
+	}
+
+	rec := recommendations[0]
+	wantMemory := quantityFromInt(minMemoryBytes)
+	if rec.Recommendation.Memory.Cmp(*wantMemory) != 0 {
+		t.Errorf("Memory: got %s, want %s", rec.Recommendation.Memory.String(), wantMemory.String())
+	}
+
+	wantCPURequest := mustParseQuantity(fmt.Sprintf("%dm", minCPURequestMilli))
+	if rec.Recommendation.CPU.Request.Cmp(*wantCPURequest) != 0 {
+		t.Errorf("CPU Request: got %s, want %s", rec.Recommendation.CPU.Request.String(), wantCPURequest.String())
+	}
+
+	wantCPULimit := mustParseQuantity(fmt.Sprintf("%dm", minCPULimitMilli))
+	if rec.Recommendation.CPU.Limit.Cmp(*wantCPULimit) != 0 {
+		t.Errorf("CPU Limit: got %s, want %s", rec.Recommendation.CPU.Limit.String(), wantCPULimit.String())
+	}
+}
+
+func TestRecommenderUseCase_CalculateForInitContainers_HappyPath(t *testing.T) {
+	// Arrange
+	baseDeployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-deployment", Namespace: "test-ns"},
+		Spec: appsv1.DeploymentSpec{
+			Template: v1.PodTemplateSpec{
+				Spec: v1.PodSpec{
+					InitContainers: []v1.Container{{Name: "init-setup"}},
+				},
+			},
+		},
+	}
+
+	deploymentGW := &mockDeploymentGateway{deployment: baseDeployment}
+	metricsGW := &mockMetricsGateway{
+		initMemValue: 50 * 1024 * 1024,
+	}
+	uc := NewRecommenderUseCase(deploymentGW, metricsGW, newTestLogger())
+
+	params := DeploymentParams{
+		Namespace:      "test-ns",
+		DeploymentName: "test-deployment",
+		TimeRange:      "7d",
+	}
+
+	// Act
+	recommendations, err := uc.CalculateForInitContainers(context.Background(), params)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(recommendations) != 1 {
+		t.Fatalf("expected 1 recommendation, got %d", len(recommendations))
+	}
+
+	rec := recommendations[0]
+	if rec.ContainerName != "init-setup" {
+		t.Errorf("expected container name 'init-setup', got '%s'", rec.ContainerName)
+	}
+
+	wantMemory := quantityFromInt((50 * 1024 * 1024 * initContainerMemoryBufferPercent) / 100)
+	if rec.Recommendation.Memory.Cmp(*wantMemory) != 0 {
+		t.Errorf("Memory: got %s, want %s", rec.Recommendation.Memory.String(), wantMemory.String())
+	}
+
+	wantCPURequest := mustParseQuantity(initCPURequestDefault)
+	if rec.Recommendation.CPU.Request.Cmp(*wantCPURequest) != 0 {
+		t.Errorf("CPU Request: got %s, want %s", rec.Recommendation.CPU.Request.String(), wantCPURequest.String())
+	}
+
+	wantCPULimit := mustParseQuantity(initCPULimitDefault)
+	if rec.Recommendation.CPU.Limit.Cmp(*wantCPULimit) != 0 {
+		t.Errorf("CPU Limit: got %s, want %s", rec.Recommendation.CPU.Limit.String(), wantCPULimit.String())
+	}
+}
+
+func TestRecommenderUseCase_CalculateForInitContainers_NoMetricsData(t *testing.T) {
+	// Arrange
+	baseDeployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-deployment", Namespace: "test-ns"},
+		Spec: appsv1.DeploymentSpec{
+			Template: v1.PodTemplateSpec{
+				Spec: v1.PodSpec{
+					InitContainers: []v1.Container{{Name: "init-setup"}},
+				},
+			},
+		},
+	}
+
+	deploymentGW := &mockDeploymentGateway{deployment: baseDeployment}
+	metricsGW := &mockMetricsGateway{}
+	uc := NewRecommenderUseCase(deploymentGW, metricsGW, newTestLogger())
+
+	params := DeploymentParams{
+		Namespace:      "test-ns",
+		DeploymentName: "test-deployment",
+		TimeRange:      "7d",
+	}
+
+	// Act
+	recommendations, err := uc.CalculateForInitContainers(context.Background(), params)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(recommendations) != 1 {
+		t.Fatalf("expected 1 recommendation, got %d", len(recommendations))
+	}
+
+	rec := recommendations[0]
+	wantMemory := resource.MustParse(initMemoryDefault)
+	if rec.Recommendation.Memory.Cmp(wantMemory) != 0 {
+		t.Errorf("Memory: got %s, want %s", rec.Recommendation.Memory.String(), wantMemory.String())
+	}
+}
+
+func TestRecommenderUseCase_CalculateForAll_HappyPath(t *testing.T) {
+	// Arrange
+	baseDeployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-deployment", Namespace: "test-ns"},
+		Spec: appsv1.DeploymentSpec{
+			Template: v1.PodTemplateSpec{
+				Spec: v1.PodSpec{
+					Containers:     []v1.Container{{Name: "main-app"}},
+					InitContainers: []v1.Container{{Name: "init-setup"}},
+				},
+			},
+		},
+	}
+
+	deploymentGW := &mockDeploymentGateway{deployment: baseDeployment}
+	metricsGW := &mockMetricsGateway{
+		memValue:     100 * 1024 * 1024,
+		cpuP90Value:  0.2,
+		cpuP99Value:  0.4,
+		cpuP50Value:  0.25,
+		initMemValue: 50 * 1024 * 1024,
+	}
+	uc := NewRecommenderUseCase(deploymentGW, metricsGW, newTestLogger())
+
+	params := DeploymentParams{
+		Namespace:      "test-ns",
+		DeploymentName: "test-deployment",
+		TimeRange:      "7d",
+	}
+
+	// Act
+	recommendations, err := uc.CalculateForAll(context.Background(), params.Namespace, params.DeploymentName, params.TargetContainer, params.TimeRange)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(recommendations.MainContainers) != 1 {
+		t.Fatalf("expected 1 main recommendation, got %d", len(recommendations.MainContainers))
+	}
+	if len(recommendations.InitContainers) != 1 {
+		t.Fatalf("expected 1 init recommendation, got %d", len(recommendations.InitContainers))
+	}
+
+	mainRec := recommendations.MainContainers[0]
+	if mainRec.ContainerName != "main-app" {
+		t.Errorf("expected main container name 'main-app', got '%s'", mainRec.ContainerName)
+	}
+
+	initRec := recommendations.InitContainers[0]
+	if initRec.ContainerName != "init-setup" {
+		t.Errorf("expected init container name 'init-setup', got '%s'", initRec.ContainerName)
+	}
+
+	// Assert main container recommendation
+	wantMainMemory := quantityFromInt((100 * 1024 * 1024 * mainContainerMemoryBufferPercent) / 100)
+	wantMainCPURequest := mustParseQuantity("200m")
+	wantMainCPULimit := mustParseQuantity("400m")
+	assertRecommendation(t, "MainContainer", mainRec.Recommendation, &entity.Recommendation{
+		Memory:      wantMainMemory,
+		IsOOMKilled: false,
+		CPU: &entity.CPURecommendation{
+			Request:          wantMainCPURequest,
+			Limit:            wantMainCPULimit,
+			SpikinessWarning: false,
+		},
+	})
+
+	// Assert init container recommendation
+	wantInitMemory := quantityFromInt((50 * 1024 * 1024 * initContainerMemoryBufferPercent) / 100)
+	wantInitCPURequest := mustParseQuantity(initCPURequestDefault)
+	wantInitCPULimit := mustParseQuantity(initCPULimitDefault)
+	assertRecommendation(t, "InitContainer", initRec.Recommendation, &entity.Recommendation{
+		Memory:      wantInitMemory,
+		IsOOMKilled: false,
+		CPU: &entity.CPURecommendation{
+			Request:          wantInitCPURequest,
+			Limit:            wantInitCPULimit,
+			SpikinessWarning: false,
+		},
+	})
 }

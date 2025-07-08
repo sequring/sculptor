@@ -55,6 +55,7 @@ func Load() (*Data, error) {
 	viper.BindPFlag("silent", pflag.Lookup("silent"))
 	viper.BindPFlag("verbose", pflag.Lookup("verbose"))
 
+	
 	pflag.Parse()
 	genConfig, _ := pflag.CommandLine.GetBool("generate-config")
 	if genConfig {
@@ -66,6 +67,7 @@ func Load() (*Data, error) {
 		os.Exit(0)
 	}
 
+	pflag.Parse()
 	configPath, _ := pflag.CommandLine.GetString("config")
 	viper.SetConfigFile(configPath)
 	viper.SetConfigType("toml")
