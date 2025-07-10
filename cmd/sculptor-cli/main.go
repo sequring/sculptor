@@ -104,20 +104,27 @@ func main() {
 	var recommendations *usecase.AllRecommendations
 	var calcErr error
 
+	params := usecase.DeploymentParams{
+		Namespace:       cfg.Namespace,
+		DeploymentName:  cfg.Deployment,
+		TargetContainer: cfg.Container,
+		TimeRange:       cfg.Range,
+	}
+
 	switch cfg.Target {
 	case "all":
 		logger.Info("Analyzing all containers", "deployment", cfg.Deployment, "namespace", cfg.Namespace, "range", cfg.Range)
 		recommendations, calcErr = recommender.CalculateForAll(context.Background(), cfg.Namespace, cfg.Deployment, cfg.Container, cfg.Range)
 	case "init":
 		logger.Info("Analyzing init containers", "deployment", cfg.Deployment, "namespace", cfg.Namespace, "range", cfg.Range)
-		initRecs, err := recommender.CalculateForInitContainers(context.Background(), cfg.Namespace, cfg.Deployment, cfg.Container, cfg.Range)
+		initRecs, err := recommender.CalculateForInitContainers(context.Background(), params)
 		if err == nil {
 			recommendations = &usecase.AllRecommendations{InitContainers: initRecs}
 		}
 		calcErr = err
 	default: // main
 		logger.Info("Analyzing main containers", "deployment", cfg.Deployment, "namespace", cfg.Namespace, "range", cfg.Range)
-		mainRecs, err := recommender.CalculateForDeployment(context.Background(), cfg.Namespace, cfg.Deployment, cfg.Container, cfg.Range)
+		mainRecs, err := recommender.CalculateForDeployment(context.Background(), params)
 		if err == nil {
 			recommendations = &usecase.AllRecommendations{MainContainers: mainRecs}
 		}
