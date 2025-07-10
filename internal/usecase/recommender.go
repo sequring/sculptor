@@ -60,7 +60,7 @@ func (uc *RecommenderUseCase) CalculateForDeployment(ctx context.Context, params
 		if found {
 			containersToAnalyze = append(containersToAnalyze, params.TargetContainer)
 		} else {
-			return []NamedRecommendation{}, nil
+			return nil, fmt.Errorf("container '%s' not found in deployment '%s'", targetContainerName, deploymentName)
 		}
 	} else {
 		for _, c := range d.Spec.Template.Spec.Containers {
@@ -182,7 +182,7 @@ func (uc *RecommenderUseCase) CalculateForInitContainers(ctx context.Context, pa
 		if found {
 			containersToAnalyze = append(containersToAnalyze, params.TargetContainer)
 		} else {
-			return []NamedRecommendation{}, nil
+			return nil, fmt.Errorf("container '%s' not found in deployment '%s'", targetContainerName, deploymentName)
 		}
 	} else {
 		for _, c := range d.Spec.Template.Spec.InitContainers {
